@@ -1,0 +1,419 @@
+<script>
+/* =====================================================================
+   SICAM · js/Inventario — tabla de bienes y CRUD
+     1. Tabla con filtros (búsqueda, categoría, aula, estado, prestados)
+     2. Vista rápida de un bien (modal que se abre desde cualquier pantalla)
+     3. Editar y eliminar un bien (UPDATE y DELETE)
+     4. Marcar como reparado
+     5. Exportar a CSV, Excel e informe PDF
+   ===================================================================== */
+
+/* ---------- 1. TABLA ---------- */
+const FILAS_POR_PAGINA = 150;
+let filasVisibles = FILAS_POR_PAGINA;
+let inventarioFiltrado = [];
+
+function coincideEstado(a, filtro) {
+  const e = String(a.estado || '').toLowerCase();
+  if (filtro === 'bueno') return e.indexOf('buen') >= 0 || e.indexOf('excelente') >= 0;
+  if (filtro === 'regular') return e.indexOf('regular') >= 0;
+  if (filtro === 'dañado') return e.indexOf('dañ') >= 0 || e.indexOf('dan') >= 0;
+  if (filtro === 'mantenimiento') return e.indexOf('manten') >= 0;
+  if (filtro === 'baja') return e.indexOf('baja') >= 0;
+  if (filtro === 'prestado') return !!a.prestamo;
+  return true;
+}
+
+function renderInventario(reiniciarPagina) {
+  if (reiniciarPagina) filasVisibles = FILAS_POR_PAGINA;
+  const q = document.getElementById('searchInput').value.toLowerCase().trim();
+  const cat = document.getElementById('categoryFilter').value;
+  const est = document.getElementById('estadoFilter').value;
+  const aula = document.getElementById('aulaFilter').value;
+
+  inventarioFiltrado = todosLosActivos.filter(function (a) {
+    const texto = (a.nombre + ' ' + a.id + ' ' + a.ubicacion + ' ' + a.categoria + ' ' + (a.prestamo || '')).toLowerCase();
+    return (!q || texto.indexOf(q) >= 0) &&
+      (cat === 'all' || a.categoria === cat) &&
+      (aula === 'all' || a.ubicacion === aula) &&
+      (est === 'all' || coincideEstado(a, est));
+  });
+
+  const body = document.getElementById('productTableBody');
+  const empty = document.getElementById('emptyState');
+  const masWrap = document.getElementById('masWrap');
+  document.getElementById('resultText').textContent = plural(inventarioFiltrado.length, 'bien encontrado', 'bienes encontrados');
+  actualizarFiltroCategorias();
+  actualizarFiltroAulas();
+
+  if (!inventarioFiltrado.length) { body.innerHTML = ''; empty.classList.remove('hidden'); masWrap.classList.add('hidden'); return; }
+  empty.classList.add('hidden');
+  masWrap.classList.toggle('hidden', inventarioFiltrado.length <= filasVisibles);
+
+  // Se arma todo el HTML de una vez (mucho más rápido que fila por fila) y se muestran 150 filas por página
+  body.innerHTML = inventarioFiltrado.slice(0, filasVisibles).map(function (a) {
+    return '<tr>' +
+      '<td><div class="celda-bien"><strong>' + escapeHTML(a.nombre || 'Sin nombre') + '</strong>' +
+        (a.prestamo ? '<span class="status status-prestado">Prestado hasta ' + escapeHTML(a.prestamoHasta) + '</span>' : '') + '</div></td>' +
+      '<td data-col="Categoría">' + escapeHTML(a.categoria || '—') + '</td>' +
+      '<td data-col="ID"><span class="code-badge">' + escapeHTML(a.id) + '</span></td>' +
+      '<td data-col="Ubicación">' + escapeHTML(a.ubicacion || '—') + '</td>' +
+      '<td data-col="Asignado">' + escapeHTML(a.asignado || '—') + '</td>' +
+      '<td data-col="Costo">' + dinero(a.costo) + '</td>' +
+      '<td><span class="status ' + claseEstado(a.estado) + '">' + escapeHTML(a.estado || '—') + '</span></td>' +
+      '<td><div class="action-buttons">' +
+        botonAccion('action-btn', 'abrirFicha', a.id, 'Ficha') +
+        botonAccion('action-btn', 'abrirEditarActivo', a.id, icono('editar') + 'Editar') +
+        (necesitaReparar(a.estado) ? botonAccion('action-btn action-btn-ok', 'abrirReparado', a.id, '✔ Reparado') : '') +
+      '</div></td></tr>';
+  }).join('');
+}
+
+function mostrarMasFilas() {
+  filasVisibles += FILAS_POR_PAGINA;
+  renderInventario();
+}
+
+/** Aulas que tienen al menos un bien (ordenadas como 101, 102 … 201) */
+function listaAulasActivos() {
+  const aulas = [];
+  todosLosActivos.forEach(function (a) {
+    const u = String(a.ubicacion || '').trim();
+    if (u && aulas.indexOf(u) < 0) aulas.push(u);
+  });
+  return aulas.sort(function (x, y) { return x.localeCompare(y, 'es', { numeric: true }); });
+}
+
+/** Llena un <select> de filtro solo si cambiaron las opciones (evita perder la selección) */
+function llenarFiltro(sel, opciones, textoTodas) {
+  const firma = opciones.join('|');
+  if (sel.getAttribute('data-firma') === firma) return;
+  const actual = sel.value;
+  sel.setAttribute('data-firma', firma);
+  sel.innerHTML = '<option value="all">' + textoTodas + '</option>' +
+    opciones.map(function (o) { return '<option value="' + escapeHTML(o) + '">' + escapeHTML(o) + '</option>'; }).join('');
+  sel.value = opciones.indexOf(actual) >= 0 ? actual : 'all';
+}
+
+function actualizarFiltroAulas() { llenarFiltro(document.getElementById('aulaFilter'), listaAulasActivos(), 'Todas las aulas'); }
+
+function actualizarFiltroCategorias() {
+  const cats = [];
+  todosLosActivos.forEach(function (a) { if (a.categoria && cats.indexOf(a.categoria) < 0) cats.push(a.categoria); });
+  llenarFiltro(document.getElementById('categoryFilter'), cats.sort(), 'Todas las categorías');
+}
+
+function abrirFicha(id) { navegarAFicha(id, vistaActual || 'inicio'); }
+
+/** La ficha es otra página de la Web App: …/exec?id=ID&from=vista */
+function navegarAFicha(id, desde) {
+  if (!URL_APP) { showToast('No se pudo abrir la ficha: falta la URL de la Web App.'); return; }
+  showToast('Abriendo ficha…');
+  const sep = URL_APP.indexOf('?') >= 0 ? '&' : '?';
+  window.top.location.href = URL_APP + sep + 'id=' + encodeURIComponent(id) + '&from=' + encodeURIComponent(desde || 'inicio');
+}
+
+let busquedaTimer = null;
+document.getElementById('searchInput').addEventListener('input', function () {
+  clearTimeout(busquedaTimer);
+  busquedaTimer = setTimeout(function () { renderInventario(true); }, 180);
+});
+['categoryFilter', 'estadoFilter', 'aulaFilter'].forEach(function (id) {
+  document.getElementById(id).addEventListener('change', function () { renderInventario(true); });
+});
+
+/* ---------- 2. VISTA RÁPIDA DE UN BIEN ---------- */
+function abrirMueble(id) {
+  const a = buscarActivoLocal(id);
+  if (!a) { showToast('No se encontró el bien ' + id); return; }
+  const prestable = !a.prestamo && !/baja/i.test(a.estado);
+  document.getElementById('muebleBox').innerHTML =
+    '<div class="scan-top"><div><strong>' + escapeHTML(a.nombre || 'Sin nombre') + '</strong>' +
+    '<span class="scan-id">' + escapeHTML(a.id) + '</span></div>' +
+    '<span class="status ' + claseEstado(a.estado) + '">' + escapeHTML(a.estado || '—') + '</span></div>' +
+    '<div class="scan-datos espaciado">' +
+      '<span><b>Ubicación:</b> ' + escapeHTML(a.ubicacion || '—') + '</span>' +
+      '<span><b>Categoría:</b> ' + escapeHTML(a.categoria || '—') + '</span>' +
+      '<span><b>Asignado:</b> ' + escapeHTML(a.asignado || '—') + '</span>' +
+      '<span><b>Costo:</b> ' + dinero(a.costo) + '</span>' +
+      (a.observaciones ? '<span><b>Observaciones:</b> ' + escapeHTML(String(a.observaciones).split(' | ').pop()) + '</span>' : '') +
+    '</div>' +
+    (a.prestamo ? '<p class="aviso-prestamo mb-12">' + icono('prestamo') + 'Prestado en ' + escapeHTML(a.prestamo) + ' hasta el ' + escapeHTML(a.prestamoHasta) + '</p>' : '') +
+    '<div class="scan-acciones">' +
+      botonAccion('secondary-button', 'abrirFicha', a.id, 'Ver ficha') +
+      botonAccion('secondary-button', 'abrirEditarActivo', a.id, icono('editar') + 'Editar') +
+      (prestable ? botonAccion('secondary-button', 'prestarBien', a.id, icono('prestamo') + 'Prestar') : '') +
+      botonAccion('primary-button btn-peligro', 'reportarDesdeEscaneo', a.id, icono('alerta') + 'Reportar') +
+      (necesitaReparar(a.estado) ? botonAccion('primary-button btn-ok', 'abrirReparado', a.id, '✔ Reparado') : '') +
+      botonAccion('secondary-button', 'cerrarMueble', null, 'Cerrar') +
+    '</div>';
+  document.getElementById('muebleModal').classList.remove('hidden');
+}
+
+function cerrarMueble() { document.getElementById('muebleModal').classList.add('hidden'); }
+
+/** Después de guardar algo: recarga activos y repinta la pantalla en la que está el usuario */
+function refrescarVistaActual() {
+  return cargarActivos(true).then(function () {
+    if (vistaActual === 'mapa') { datosMapa = null; cargarMapa(); }
+    if (vistaActual === 'escanear' && ultimoEscaneado) mostrarResultadoConsulta(buscarActivoLocal(ultimoEscaneado), ultimoEscaneado);
+    if (vistaActual === 'gestion') refrescarTrasCambio();
+    if (vistaActual === 'prestamos') renderPrestamos();
+  });
+}
+
+/* ---------- 3. EDITAR Y ELIMINAR (UPDATE / DELETE) ---------- */
+let editandoId = null;
+
+function opcionesSelect(sel, lista, actual) {
+  const valores = lista.slice();
+  if (actual && valores.indexOf(actual) < 0) valores.unshift(actual);
+  sel.innerHTML = '<option value="">— Elegir —</option>' +
+    valores.map(function (v) { return '<option value="' + escapeHTML(v) + '">' + escapeHTML(v) + '</option>'; }).join('');
+  sel.value = actual || '';
+}
+
+function abrirEditarActivo(id) {
+  const a = buscarActivoLocal(id);
+  if (!a) { showToast('No se encontró el bien ' + id); return; }
+  cerrarMueble();
+  editandoId = a.id;
+  document.getElementById('eaId').textContent = a.id + (a.prestamo ? ' · prestado en ' + a.prestamo : '');
+  document.getElementById('eaNombre').value = a.nombre || '';
+  document.getElementById('eaCategoria').value = a.categoria || '';
+  document.getElementById('eaMarca').value = a.marca || '';
+  document.getElementById('eaAsignado').value = a.asignado || '';
+  document.getElementById('eaCosto').value = Number(a.costo) || 0;
+  document.getElementById('eaObs').value = a.observaciones || '';
+  document.getElementById('eaMotivo').value = '';
+  limpiarErrores('formActivo');
+  document.getElementById('eaPeligro').classList.toggle('hidden', !esAdminUI());
+  document.getElementById('eaPeligro').open = false;
+  document.getElementById('eaGuardar').disabled = false;
+
+  obtenerListasSicam().then(function (l) {
+    opcionesSelect(document.getElementById('eaUbicacion'), l.aulas || listaAulasActivos(), a.ubicacion);
+    opcionesSelect(document.getElementById('eaEstado'), l.estados || ['Bueno', 'Regular', 'Dañado', 'En Mantenimiento'], a.estado);
+    const cats = (l.categorias || []).slice();
+    todosLosActivos.forEach(function (x) { if (x.categoria && cats.indexOf(x.categoria) < 0) cats.push(x.categoria); });
+    document.getElementById('eaCategorias').innerHTML = cats.map(function (c) { return '<option value="' + escapeHTML(c) + '">'; }).join('');
+  });
+  document.getElementById('modalActivo').classList.remove('hidden');
+  setTimeout(function () { document.getElementById('eaNombre').focus(); }, 50);
+}
+
+function cerrarEditarActivo() { document.getElementById('modalActivo').classList.add('hidden'); editandoId = null; }
+
+/* Errores por campo: el mensaje va en <small class="campo-error" id="…Err"> y el campo se marca en rojo */
+function marcarError(idCampo, mensaje) {
+  const campo = document.getElementById(idCampo);
+  const err = document.getElementById(idCampo + 'Err');
+  if (err) err.textContent = mensaje || '';
+  if (campo) campo.closest('.form-field').classList.toggle('con-error', !!mensaje);
+  return !mensaje;
+}
+function limpiarErrores(idForm) {
+  const f = document.getElementById(idForm);
+  f.querySelectorAll('.campo-error').forEach(function (e) { e.textContent = ''; });
+  f.querySelectorAll('.con-error').forEach(function (e) { e.classList.remove('con-error'); });
+}
+
+/** Mismas reglas que validarActivo_() del servidor */
+function validarActivoUI() {
+  limpiarErrores('formActivo');
+  const nombre = document.getElementById('eaNombre').value.trim();
+  const costoTxt = document.getElementById('eaCosto').value.trim();
+  const costo = Number(costoTxt);
+  let ok = true;
+  if (nombre.length < 3) ok = marcarError('eaNombre', 'Escribe el nombre (mínimo 3 letras).') && ok;
+  if (!document.getElementById('eaUbicacion').value) ok = marcarError('eaUbicacion', 'Elige la ubicación.') && ok;
+  if (costoTxt && (isNaN(costo) || costo < 0 || costo > 100000)) ok = marcarError('eaCosto', 'Debe ser un número entre 0 y 100 000.') && ok;
+  return ok;
+}
+
+function guardarEdicionActivo() {
+  if (!editandoId || !validarActivoUI()) return;
+  const btn = document.getElementById('eaGuardar');
+  btn.disabled = true;
+  llamar('editarActivo', {
+    id: editandoId,
+    nombre: document.getElementById('eaNombre').value.trim(),
+    categoria: document.getElementById('eaCategoria').value.trim(),
+    marca: document.getElementById('eaMarca').value.trim(),
+    ubicacion: document.getElementById('eaUbicacion').value,
+    asignado: document.getElementById('eaAsignado').value.trim(),
+    costo: document.getElementById('eaCosto').value.trim(),
+    estado: document.getElementById('eaEstado').value,
+    observaciones: document.getElementById('eaObs').value.trim(),
+    token: tokenSesion()
+  }).then(function (r) {
+    btn.disabled = false;
+    showToast(r.mensaje || 'Listo');
+    if (r.exito) { cerrarEditarActivo(); refrescarVistaActual(); }
+  });
+}
+
+function eliminarActivoUI() {
+  const motivo = document.getElementById('eaMotivo').value.trim();
+  if (motivo.length < 5) { showToast('Escribe el motivo de la eliminación (mínimo 5 letras).'); document.getElementById('eaMotivo').focus(); return; }
+  if (!confirm('¿Eliminar definitivamente ' + editandoId + '? Quedará una copia en la hoja Eliminados.')) return;
+  const btn = document.getElementById('eaEliminar');
+  btn.disabled = true;
+  llamar('eliminarActivo', { id: editandoId, motivo: motivo, token: tokenSesion() }).then(function (r) {
+    btn.disabled = false;
+    showToast(r.mensaje || 'Listo');
+    if (r.exito) { cerrarEditarActivo(); refrescarVistaActual(); }
+  });
+}
+
+/* ---------- 4. MARCAR COMO REPARADO ---------- */
+let repId = null;
+
+function abrirReparado(id) {
+  const a = buscarActivoLocal(id);
+  cerrarMueble();
+  repId = a ? a.id : id;
+  document.getElementById('repActivo').textContent = a ? a.nombre + ' · ' + a.id : id;
+  document.getElementById('repEstado').value = 'Bueno';
+  document.getElementById('repDetalle').value = '';
+  document.getElementById('btnConfirmarRep').disabled = false;
+  document.getElementById('modalReparado').classList.remove('hidden');
+}
+
+function cerrarReparado() { document.getElementById('modalReparado').classList.add('hidden'); repId = null; }
+
+function confirmarReparado() {
+  if (!repId) return;
+  const a = buscarActivoLocal(repId);
+  const btn = document.getElementById('btnConfirmarRep');
+  btn.disabled = true;
+  llamar('marcarReparado', {
+    id: repId, nombre: a ? a.nombre : '',
+    nuevoEstado: document.getElementById('repEstado').value,
+    detalle: document.getElementById('repDetalle').value.trim(),
+    token: tokenSesion()
+  }).then(function (r) {
+    btn.disabled = false;
+    showToast(r.mensaje || 'Listo');
+    if (r.exito) { cerrarReparado(); refrescarVistaActual(); }
+  });
+}
+
+/* ---------- 5. EXPORTAR (CSV, Excel y PDF: todo en el navegador) ---------- */
+const COLUMNAS_EXPORT = [
+  ['id', 'ID'], ['nombre', 'Nombre'], ['categoria', 'Categoría'], ['marca', 'Marca/Modelo'],
+  ['ubicacion', 'Ubicación'], ['asignado', 'Asignado a'], ['costo', 'Costo ($)'],
+  ['estado', 'Estado'], ['prestamo', 'Préstamo'], ['observaciones', 'Observaciones']
+];
+
+function filasExport() {
+  if (!inventarioFiltrado.length) { showToast('No hay bienes para exportar con estos filtros.'); return null; }
+  return inventarioFiltrado;
+}
+
+function nombreArchivo(ext) { return 'SICAM_inventario_' + fechaIsoMas(0) + '.' + ext; }
+
+function descargarBlob(blob, nombre) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = nombre;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(function () { URL.revokeObjectURL(url); a.remove(); }, 1500);
+}
+
+function valorExport(a, campo) {
+  if (campo === 'costo') return (Number(a.costo) || 0).toFixed(2);
+  if (campo === 'prestamo') return a.prestamo ? a.prestamo + ' (hasta ' + a.prestamoHasta + ')' : '';
+  return a[campo] == null ? '' : a[campo];
+}
+
+function exportarCSV() {
+  const lista = filasExport();
+  if (!lista) return;
+  const celda = function (v) {
+    const s = String(v);
+    return /[",\n;]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  };
+  const lineas = [COLUMNAS_EXPORT.map(function (c) { return c[1]; }).join(',')];
+  lista.forEach(function (a) { lineas.push(COLUMNAS_EXPORT.map(function (c) { return celda(valorExport(a, c[0])); }).join(',')); });
+  // El BOM (﻿) hace que Excel muestre bien las tildes y la ñ
+  descargarBlob(new Blob(['﻿' + lineas.join('\r\n')], { type: 'text/csv;charset=utf-8' }), nombreArchivo('csv'));
+  showToast('CSV descargado (' + plural(lista.length, 'bien', 'bienes') + ').');
+}
+
+function exportarExcel() {
+  const lista = filasExport();
+  if (!lista) return;
+  showToast('Preparando Excel…');
+  asegurarXLSX().then(function () {
+    const filas = [COLUMNAS_EXPORT.map(function (c) { return c[1]; })];
+    lista.forEach(function (a) {
+      filas.push(COLUMNAS_EXPORT.map(function (c) { return c[0] === 'costo' ? (Number(a.costo) || 0) : valorExport(a, c[0]); }));
+    });
+    const hoja = XLSX.utils.aoa_to_sheet(filas);
+    hoja['!cols'] = [{ wch: 18 }, { wch: 32 }, { wch: 20 }, { wch: 18 }, { wch: 16 }, { wch: 22 }, { wch: 10 }, { wch: 16 }, { wch: 24 }, { wch: 50 }];
+    const r = resumenExport(lista);
+    const resumen = XLSX.utils.aoa_to_sheet([
+      ['Centro Escolar General Francisco Morazán · Código 11532'],
+      ['Informe de inventario de mobiliario y equipo'],
+      ['Fecha', new Date().toLocaleString('es-SV')],
+      ['Alcance', textoFiltros()],
+      [],
+      ['Total de bienes', r.total], ['Valor estimado ($)', r.valor],
+      ['Bueno', r.bueno], ['Regular', r.regular], ['Dañado', r.danado], ['En mantenimiento', r.mant],
+      ['Índice de salud (%)', r.salud],
+      [], [], ['Elaboró', '', 'Revisó', '', 'Director(a)']
+    ]);
+    resumen['!cols'] = [{ wch: 22 }, { wch: 40 }, { wch: 14 }, { wch: 4 }, { wch: 18 }];
+    const libro = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(libro, resumen, 'Resumen');
+    XLSX.utils.book_append_sheet(libro, hoja, 'Inventario');
+    XLSX.writeFile(libro, nombreArchivo('xlsx'));
+  }).catch(function () { showToast('No se pudo cargar el generador de Excel. Usa CSV.'); });
+}
+
+function resumenExport(lista) {
+  const c = { bueno: 0, regular: 0, danado: 0, mantenimiento: 0 };
+  let valor = 0;
+  lista.forEach(function (a) { valor += Number(a.costo) || 0; c[grupoEstado(a.estado)]++; });
+  return { total: lista.length, valor: Math.round(valor * 100) / 100, bueno: c.bueno, regular: c.regular, danado: c.danado,
+    mant: c.mantenimiento, salud: lista.length ? Math.round(c.bueno / lista.length * 100) : 100 };
+}
+
+function textoFiltros() {
+  const partes = [];
+  const txt = function (id) { const s = document.getElementById(id); return s.options[s.selectedIndex] ? s.options[s.selectedIndex].text : ''; };
+  if (document.getElementById('aulaFilter').value !== 'all') partes.push('Aula: ' + txt('aulaFilter'));
+  if (document.getElementById('categoryFilter').value !== 'all') partes.push('Categoría: ' + txt('categoryFilter'));
+  if (document.getElementById('estadoFilter').value !== 'all') partes.push('Estado: ' + txt('estadoFilter'));
+  const q = document.getElementById('searchInput').value.trim();
+  if (q) partes.push('Búsqueda: "' + q + '"');
+  return partes.length ? partes.join(' · ') : 'Todo el inventario';
+}
+
+/** Informe con formato oficial: el navegador lo imprime o lo guarda como PDF */
+function exportarPDF() {
+  const lista = filasExport();
+  if (!lista) return;
+  const r = resumenExport(lista);
+  imprimirHoja(
+    encabezadoOficial('Informe de inventario de mobiliario y equipo', escapeHTML(new Date().toLocaleString('es-SV'))) +
+    '<p class="inf-filtros"><b>Alcance:</b> ' + escapeHTML(textoFiltros()) + '</p>' +
+    '<table class="inf-resumen"><tr>' +
+      '<td><b>' + r.total + '</b>Bienes</td><td><b>' + dinero(r.valor) + '</b>Valor estimado</td>' +
+      '<td><b>' + r.bueno + '</b>Bueno</td><td><b>' + r.regular + '</b>Regular</td>' +
+      '<td><b>' + r.danado + '</b>Dañado</td><td><b>' + r.mant + '</b>Mantenimiento</td><td><b>' + r.salud + '%</b>Salud</td>' +
+    '</tr></table>' +
+    '<table class="inf-tabla"><thead><tr><th>#</th><th>ID</th><th>Nombre</th><th>Categoría</th><th>Ubicación</th><th>Asignado</th><th>Costo</th><th>Estado</th></tr></thead><tbody>' +
+    lista.map(function (a, i) {
+      return '<tr><td>' + (i + 1) + '</td><td>' + escapeHTML(a.id) + '</td><td>' + escapeHTML(a.nombre) + '</td><td>' +
+        escapeHTML(a.categoria) + '</td><td>' + escapeHTML(a.ubicacion) + '</td><td>' + escapeHTML(a.asignado) + '</td><td>' +
+        dinero(a.costo) + '</td><td>' + escapeHTML(a.estado) + (a.prestamo ? ' (prestado)' : '') + '</td></tr>';
+    }).join('') +
+    '</tbody></table>' +
+    '<div class="inf-firmas"><div><span></span>Elaboró · Encargado(a) de inventario</div><div><span></span>Revisó</div><div><span></span>Director(a) · Sello</div></div>'
+  );
+  showToast('En la ventana de impresión elige “Guardar como PDF”.');
+}
+</script>

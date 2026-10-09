@@ -1,0 +1,462 @@
+<script>
+/* =====================================================================
+   SICAM · js/Escaner — escanear QR, auditar un aula y reportar fallas
+     1. Lector QR (foto de la cámara del teléfono o cámara en vivo)
+     2. Resultado de la consulta
+     3. Auditoría exprés por aula
+     4. Reporte exprés de fallas con validación de la foto por IA
+   ===================================================================== */
+
+/* ---------- 1. LECTOR QR ---------- */
+let lectorQR = null;
+let camaraActiva = false;
+let modoEscaneo = 'consulta';
+let ultimoEscaneado = '';
+let ultimoEscaneoEn = 0;
+
+function setEstadoEscaner(txt) { document.getElementById('escanerEstado').textContent = txt; }
+
+function prepararEscaner() {
+  obtenerActivos().then(poblarAulasAuditoria);
+  asegurarEscaner().catch(function () { setEstadoEscaner('No se pudo descargar el lector QR. Revisa tu conexión.'); });
+}
+
+function botonCamara(activa) {
+  document.getElementById('btnCamara').innerHTML = activa ? icono('cerrar') + 'Detener cámara' : icono('video') + 'Cámara en vivo';
+}
+
+function alternarCamara() {
+  if (camaraActiva) { detenerCamara(); return; }
+  const btn = document.getElementById('btnCamara');
+  btn.disabled = true;
+  setEstadoEscaner('Abriendo la cámara…');
+  asegurarEscaner().then(function () {
+    if (!lectorQR) lectorQR = new Html5Qrcode('lectorQR');
+    mostrarPlaceholderLector(false);
+    return lectorQR.start(
+      { facingMode: 'environment' },
+      { fps: 10, qrbox: function (w, h) { const m = Math.floor(Math.min(w, h) * 0.7); return { width: m, height: m }; } },
+      alLeerQR,
+      function () {}
+    );
+  }).then(function () {
+    camaraActiva = true;
+    btn.disabled = false;
+    botonCamara(true);
+    setEstadoEscaner('Apunta al código QR de la etiqueta.');
+  }).catch(function (err) {
+    console.warn('Cámara en vivo:', err);
+    btn.disabled = false;
+    mostrarPlaceholderLector(true);
+    setEstadoEscaner('La cámara en vivo no está permitida aquí. Usa “Escanear con la cámara”, que sí funciona.');
+  });
+}
+
+function detenerCamara() {
+  if (!lectorQR || !camaraActiva) return;
+  camaraActiva = false;
+  lectorQR.stop().catch(function () {}).then(function () { botonCamara(false); mostrarPlaceholderLector(true); });
+}
+
+function mostrarPlaceholderLector(si) { document.getElementById('lectorPlaceholder').classList.toggle('hidden', !si); }
+
+/**
+ * Lector principal: el teléfono toma una foto con su propia cámara (funciona aunque Apps Script
+ * no deje usar la cámara en vivo) y aquí se lee el QR de esa foto.
+ */
+function leerQRDesdeFoto(event) {
+  const archivo = event.target.files && event.target.files[0];
+  event.target.value = '';
+  if (!archivo) return;
+  setEstadoEscaner('Leyendo el código…');
+  const detener = camaraActiva && lectorQR ? lectorQR.stop().then(function () { camaraActiva = false; }).catch(function () {}) : Promise.resolve();
+  detener
+    .then(function () { return decodificarQRDeArchivo(archivo); })
+    .then(function (texto) { alLeerQR(texto, true); })
+    .catch(function () {
+      setEstadoEscaner('No se encontró un QR en la foto. Acércate, que el código salga completo y con buena luz.');
+      showToast('No se pudo leer el QR. Intenta otra vez.');
+    });
+}
+
+function imagenACanvas(archivo, maxLado) {
+  return new Promise(function (resolve, reject) {
+    const url = URL.createObjectURL(archivo);
+    const img = new Image();
+    img.onload = function () {
+      const k = Math.min(1, maxLado / Math.max(img.naturalWidth, img.naturalHeight));
+      const c = document.createElement('canvas');
+      c.width = Math.round(img.naturalWidth * k);
+      c.height = Math.round(img.naturalHeight * k);
+      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+      URL.revokeObjectURL(url);
+      resolve(c);
+    };
+    img.onerror = function () { URL.revokeObjectURL(url); reject(new Error('imagen')); };
+    img.src = url;
+  });
+}
+
+/** Lee un QR de una foto: primero con el lector nativo del navegador y, si no hay, con html5-qrcode */
+async function decodificarQRDeArchivo(archivo) {
+  if ('BarcodeDetector' in window) {
+    try {
+      const det = new BarcodeDetector({ formats: ['qr_code'] });
+      for (const lado of [1600, 900]) {
+        const r = await det.detect(await imagenACanvas(archivo, lado));
+        if (r && r.length && r[0].rawValue) return r[0].rawValue;
+      }
+    } catch (e) {}
+  }
+  await asegurarEscaner();
+  if (!lectorQR) lectorQR = new Html5Qrcode('lectorQR');
+  // Las fotos de 12 MP suelen fallar: se prueba primero reducida
+  for (const lado of [1200, 800]) {
+    try {
+      const c = await imagenACanvas(archivo, lado);
+      const blob = await new Promise(function (res) { c.toBlob(res, 'image/jpeg', 0.92); });
+      return await lectorQR.scanFile(new File([blob], 'qr.jpg', { type: 'image/jpeg' }), false);
+    } catch (e) {}
+  }
+  return await lectorQR.scanFile(archivo, false);
+}
+
+function buscarIdManual() {
+  const v = document.getElementById('manualId').value.trim();
+  if (!v) { showToast('Escribe un ID.'); return; }
+  alLeerQR(v, true);
+}
+
+/** El QR puede traer la URL de la ficha (…?id=XXXX) o el ID directo */
+function extraerIdDeQR(texto) {
+  const t = String(texto || '').trim();
+  const m = t.match(/[?&](?:id|ID|Id|codigo)=([^&#]+)/);
+  if (m) { try { return decodeURIComponent(m[1]); } catch (e) { return m[1]; } }
+  return t;
+}
+
+function alLeerQR(texto, manual) {
+  const id = extraerIdDeQR(texto);
+  const ahora = Date.now();
+  // La cámara lee el mismo código muchas veces por segundo: se ignora la repetición
+  if (!manual && idNorm(id) === idNorm(ultimoEscaneado) && ahora - ultimoEscaneoEn < 2500) return;
+  ultimoEscaneado = id;
+  ultimoEscaneoEn = ahora;
+  if (navigator.vibrate) { try { navigator.vibrate(80); } catch (e) {} }
+  obtenerActivos().then(function () {
+    const activo = buscarActivoLocal(id);
+    if (modoEscaneo === 'auditoria') registrarEnAuditoria(id, activo);
+    else mostrarResultadoConsulta(activo, id);
+  });
+}
+
+/* ---------- 2. RESULTADO DE LA CONSULTA ---------- */
+function mostrarResultadoConsulta(a, idLeido) {
+  const box = document.getElementById('resultadoEscaneo');
+  if (!a) {
+    setEstadoEscaner('Código leído, pero no está en el inventario.');
+    box.innerHTML = '<div class="scan-card scan-error"><strong>No encontrado</strong>' +
+      '<p>El código <code>' + escapeHTML(idLeido) + '</code> no está registrado.</p></div>';
+    return;
+  }
+  setEstadoEscaner('✓ ' + a.nombre + ' (' + a.id + ')');
+  box.innerHTML = '<div class="scan-card">' +
+    '<div class="scan-top"><div><strong>' + escapeHTML(a.nombre || 'Sin nombre') + '</strong>' +
+    '<span class="scan-id">' + escapeHTML(a.id) + '</span></div>' +
+    '<span class="status ' + claseEstado(a.estado) + '">' + escapeHTML(a.estado || '—') + '</span></div>' +
+    '<div class="scan-datos">' +
+      '<span><b>Aula:</b> ' + escapeHTML(a.ubicacion || '—') + '</span>' +
+      '<span><b>Categoría:</b> ' + escapeHTML(a.categoria || '—') + '</span>' +
+      '<span><b>Asignado:</b> ' + escapeHTML(a.asignado || '—') + '</span>' +
+    '</div>' +
+    (a.prestamo ? '<p class="aviso-prestamo">' + icono('prestamo') + 'Prestado en ' + escapeHTML(a.prestamo) + ' hasta el ' + escapeHTML(a.prestamoHasta) + '</p>' : '') +
+    '<div class="scan-acciones">' +
+      botonAccion('secondary-button', 'abrirFicha', a.id, 'Ver ficha') +
+      botonAccion('secondary-button', 'abrirEditarActivo', a.id, icono('editar') + 'Editar') +
+      botonAccion('primary-button btn-peligro', 'reportarDesdeEscaneo', a.id, icono('alerta') + 'Reportar falla') +
+      (necesitaReparar(a.estado) ? botonAccion('primary-button btn-ok', 'abrirReparado', a.id, '✔ Reparado') : '') +
+    '</div></div>';
+}
+
+function reportarDesdeEscaneo(id) {
+  cerrarMueble();
+  mostrarVista('reporte');
+  rxPreseleccionar(id);
+}
+
+function cambiarModoEscaneo(modo) {
+  modoEscaneo = modo;
+  document.getElementById('modoConsulta').classList.toggle('on', modo === 'consulta');
+  document.getElementById('modoAuditoria').classList.toggle('on', modo === 'auditoria');
+  document.getElementById('panelConsulta').classList.toggle('hidden', modo !== 'consulta');
+  document.getElementById('panelAuditoria').classList.toggle('hidden', modo !== 'auditoria');
+  document.getElementById('auditAulaWrap').classList.toggle('hidden', modo !== 'auditoria');
+  if (modo === 'auditoria') { poblarAulasAuditoria(); iniciarAuditoria(); }
+}
+
+/* ---------- 3. AUDITORÍA EXPRÉS POR AULA ---------- */
+let auditoria = { aula: '', esperados: [], presentes: {}, ajenos: [] };
+
+function poblarAulasAuditoria() {
+  const sel = document.getElementById('auditAula');
+  const actual = sel.value;
+  const aulas = listaAulasActivos();
+  sel.innerHTML = '<option value="">— Elegir aula —</option>' +
+    aulas.map(function (u) { return '<option value="' + escapeHTML(u) + '">' + escapeHTML(u) + '</option>'; }).join('');
+  if (aulas.indexOf(actual) >= 0) sel.value = actual;
+}
+
+function iniciarAuditoria() {
+  const aula = document.getElementById('auditAula').value;
+  auditoria = {
+    aula: aula,
+    // Los bienes prestados no están en el aula a propósito: no se cuentan como faltantes
+    esperados: aula ? activosVigentes().filter(function (a) { return a.ubicacion === aula && !a.prestamo; }) : [],
+    presentes: {}, ajenos: []
+  };
+  renderAuditoria();
+}
+
+function reiniciarAuditoria() {
+  if (Object.keys(auditoria.presentes).length && !confirm('¿Borrar lo escaneado en esta auditoría?')) return;
+  iniciarAuditoria();
+}
+
+function registrarEnAuditoria(id, activo) {
+  if (!auditoria.aula) { setEstadoEscaner('Primero elige el aula que vas a auditar.'); return; }
+  const clave = idNorm(activo ? activo.id : id);
+  const esperado = auditoria.esperados.find(function (a) { return idNorm(a.id) === clave; });
+  if (esperado) {
+    auditoria.presentes[clave] = true;
+    setEstadoEscaner('✓ Presente: ' + esperado.nombre);
+  } else if (!auditoria.ajenos.some(function (x) { return x.clave === clave; })) {
+    auditoria.ajenos.push({ clave: clave, id: activo ? activo.id : id, nombre: activo ? activo.nombre : 'No registrado en el inventario', aula: activo ? (activo.ubicacion || 'sin aula') : '' });
+    setEstadoEscaner('⚠ No pertenece a esta aula: ' + (activo ? activo.nombre : id));
+  }
+  renderAuditoria();
+}
+
+function renderAuditoria() {
+  const total = auditoria.esperados.length;
+  const esta = function (a) { return !!auditoria.presentes[idNorm(a.id)]; };
+  const pres = auditoria.esperados.filter(esta);
+  const aus = auditoria.esperados.filter(function (a) { return !esta(a); });
+  document.getElementById('auditPres').textContent = pres.length;
+  document.getElementById('auditAus').textContent = aus.length;
+  document.getElementById('auditAje').textContent = auditoria.ajenos.length;
+  document.getElementById('auditProgreso').textContent = pres.length + ' / ' + total;
+  const box = document.getElementById('auditLista');
+  if (!auditoria.aula) { box.innerHTML = '<div class="hist-vacio">Elige el aula y escanea cada mueble.</div>'; return; }
+  if (!total && !auditoria.ajenos.length) { box.innerHTML = '<div class="hist-vacio">Esta aula no tiene bienes registrados.</div>'; return; }
+  box.innerHTML = aus.concat(pres).map(function (a) {
+    const ok = esta(a);
+    return '<div class="audit-item ' + (ok ? 'ok' : 'falta') + '"><span class="audit-ic">' + (ok ? '✓' : '·') + '</span>' +
+      '<span class="audit-nom">' + escapeHTML(a.nombre) + '<small>' + escapeHTML(a.id) + '</small></span>' +
+      '<span class="audit-tag">' + (ok ? 'Presente' : 'Falta') + '</span></div>';
+  }).join('') + auditoria.ajenos.map(function (x) {
+    return '<div class="audit-item ajeno"><span class="audit-ic">!</span>' +
+      '<span class="audit-nom">' + escapeHTML(x.nombre) + '<small>' + escapeHTML(x.id) + (x.aula ? ' · registrado en ' + escapeHTML(x.aula) : '') + '</small></span>' +
+      '<span class="audit-tag">No pertenece</span></div>';
+  }).join('');
+}
+
+function guardarAuditoriaUI() {
+  if (!auditoria.aula) { showToast('Elige un aula primero.'); return; }
+  const pres = [], aus = [];
+  auditoria.esperados.forEach(function (a) { (auditoria.presentes[idNorm(a.id)] ? pres : aus).push(a.id); });
+  if (!pres.length && !auditoria.ajenos.length) { showToast('Aún no has escaneado nada.'); return; }
+  const btn = document.getElementById('btnGuardarAudit');
+  btn.disabled = true;
+  llamar('guardarAuditoria', {
+    aula: auditoria.aula, presentes: pres, ausentes: aus,
+    ajenos: auditoria.ajenos.map(function (x) { return x.id; }), token: tokenSesion()
+  }).then(function (r) { btn.disabled = false; showToast(r.mensaje || 'Guardado'); });
+}
+
+document.getElementById('auditAula').addEventListener('change', iniciarAuditoria);
+document.getElementById('manualId').addEventListener('keydown', function (e) { if (e.key === 'Enter') buscarIdManual(); });
+
+/* ---------- 4. REPORTE EXPRÉS DE FALLAS ----------
+   El docente elige aula → bien → tipo de falla. Si agrega foto, la IA (en el teléfono)
+   la compara con la foto del registro para avisar si parece otro mueble. */
+let rxActivoSel = null;
+let rxFotoData = '';
+let rxCanvas224 = null;
+let rxCoincidencia = null;
+let rxReqIA = 0;
+
+function prepararReporte() {
+  return obtenerActivos().then(function () {
+    const sel = document.getElementById('rxAula');
+    const actual = sel.value;
+    const aulas = listaAulasActivos();
+    sel.innerHTML = '<option value="">Todas las aulas</option>' +
+      aulas.map(function (u) { return '<option value="' + escapeHTML(u) + '">' + escapeHTML(u) + '</option>'; }).join('');
+    if (aulas.indexOf(actual) >= 0) sel.value = actual;
+    rxFiltrarActivos();
+  });
+}
+
+function rxFiltrarActivos() {
+  const aula = document.getElementById('rxAula').value;
+  const q = document.getElementById('rxBuscar').value.trim().toLowerCase();
+  const sel = document.getElementById('rxActivo');
+  const previo = rxActivoSel ? rxActivoSel.id : sel.value;
+  const lista = activosVigentes().filter(function (a) {
+    return (!aula || a.ubicacion === aula) && (!q || (a.nombre + ' ' + a.id).toLowerCase().indexOf(q) >= 0);
+  }).slice(0, 400);
+  sel.innerHTML = '<option value="">' + (lista.length ? '— Elegir (' + lista.length + ') —' : '— Sin coincidencias —') + '</option>' +
+    lista.map(function (a) { return '<option value="' + escapeHTML(a.id) + '">' + escapeHTML(a.nombre) + ' · ' + escapeHTML(a.id) + '</option>'; }).join('');
+  if (previo && lista.some(function (a) { return a.id === previo; })) sel.value = previo;
+}
+
+function rxPreseleccionar(id) {
+  prepararReporte().then(function () {
+    const a = buscarActivoLocal(id);
+    if (!a) { showToast('No se encontró ' + id); return; }
+    document.getElementById('rxBuscar').value = '';
+    const selAula = document.getElementById('rxAula');
+    selAula.value = a.ubicacion || '';
+    if (selAula.value !== (a.ubicacion || '')) selAula.value = '';
+    rxActivoSel = a;
+    rxFiltrarActivos();
+    document.getElementById('rxActivo').value = a.id;
+    rxElegirActivo();
+  });
+}
+
+function rxElegirActivo() {
+  const id = document.getElementById('rxActivo').value;
+  rxActivoSel = id ? buscarActivoLocal(id) : null;
+  const box = document.getElementById('rxSeleccion');
+  rxValidarFotoIA();
+  if (!rxActivoSel) {
+    box.classList.add('hidden');
+    document.getElementById('rxChips').innerHTML = '<span class="chips-hint">Primero elige el bien.</span>';
+    return;
+  }
+  const a = rxActivoSel;
+  box.classList.remove('hidden');
+  box.innerHTML = '<strong>' + escapeHTML(a.nombre) + '</strong><span>' + escapeHTML(a.id) + ' · ' + escapeHTML(a.ubicacion || 'sin aula') + '</span>' +
+    '<span class="status ' + claseEstado(a.estado) + '">' + escapeHTML(a.estado || '—') + '</span>';
+  rxCargarChips(a.nombre, a.categoria);
+}
+
+function rxCargarChips(nombre, grupo) {
+  const box = document.getElementById('rxChips');
+  const pintar = function (lista) {
+    box.innerHTML = (lista || []).map(function (o) { return '<button type="button" class="chip" data-obs="' + escapeHTML(o) + '">' + escapeHTML(o) + '</button>'; }).join('') +
+      '<button type="button" class="chip chip-otro" id="rxChipOtro" data-accion="rxToggleOtro">✎ Otro…</button>';
+  };
+  const clave = nombre + '|' + grupo;
+  if (obsCache[clave]) { pintar(obsCache[clave]); return; }
+  box.innerHTML = '<span class="chips-hint">Cargando opciones…</span>';
+  google.script.run
+    .withSuccessHandler(function (lista) { obsCache[clave] = lista || []; pintar(obsCache[clave]); })
+    .withFailureHandler(function () { pintar([]); })
+    .obtenerObservacionesComunes(nombre, grupo);
+}
+
+function rxToggleOtro() {
+  const inp = document.getElementById('rxOtro');
+  const mostrar = inp.classList.contains('hidden');
+  inp.classList.toggle('hidden', !mostrar);
+  const chip = document.getElementById('rxChipOtro');
+  if (chip) chip.classList.toggle('on', mostrar);
+  if (mostrar) inp.focus(); else inp.value = '';
+}
+
+async function rxProcesarFoto(event) {
+  const archivo = event.target.files && event.target.files[0];
+  event.target.value = '';
+  if (!archivo) return;
+  try {
+    const res = await procesarImagen(archivo, true);
+    rxFotoData = res.data;
+    rxCanvas224 = res.canvas224;
+    document.getElementById('rxFoto').innerHTML =
+      '<div class="foto-item principal rx-foto-prev"><img src="' + rxFotoData + '" alt="Foto del daño">' +
+      '<button type="button" class="foto-quitar" title="Quitar foto" aria-label="Quitar foto" data-accion="rxQuitarFoto">✕</button></div>';
+    rxValidarFotoIA();
+  } catch (e) {
+    showToast('No se pudo leer la foto.');
+  }
+}
+
+function rxQuitarFoto() {
+  rxFotoData = ''; rxCanvas224 = null; rxCoincidencia = null;
+  document.getElementById('rxFoto').innerHTML =
+    '<button type="button" class="secondary-button" data-abrir="rxFotoInput">' + icono('camara') + 'Agregar foto del daño</button>';
+  document.getElementById('rxIA').textContent = '';
+}
+
+async function rxValidarFotoIA() {
+  const msg = document.getElementById('rxIA');
+  rxCoincidencia = null;
+  msg.className = 'rx-ia';
+  if (!rxFotoData || !rxCanvas224) { msg.textContent = ''; return; }
+  if (!rxActivoSel) { msg.textContent = 'Elige el bien para validar la foto con IA.'; return; }
+  const mi = ++rxReqIA;
+  msg.textContent = 'Validando la foto con IA (en tu teléfono)…';
+  try {
+    await asegurarModelo();
+    const vectorFoto = vectorDeCanvas(rxCanvas224);
+    const vectorBien = await new Promise(function (resolve) {
+      google.script.run.withSuccessHandler(resolve).withFailureHandler(function () { resolve([]); }).obtenerVectorActivo(rxActivoSel.id);
+    });
+    if (mi !== rxReqIA) return;
+    if (!vectorBien || vectorBien.length !== vectorFoto.length) { msg.textContent = 'Este bien no tiene huella de IA registrada; la foto se enviará sin validar.'; return; }
+    const sim = calcularSimilitud(vectorFoto, vectorBien);
+    rxCoincidencia = Math.round(sim * 100);
+    if (sim >= 0.75) { msg.className = 'rx-ia ok'; msg.textContent = '✓ La foto coincide con el registro del bien (' + rxCoincidencia + ' %).'; }
+    else if (sim >= 0.55) { msg.className = 'rx-ia warn'; msg.textContent = '⚠ Coincidencia media (' + rxCoincidencia + ' %). Puede ser por el daño o el ángulo; revisa que sea el bien correcto.'; }
+    else { msg.className = 'rx-ia bad'; msg.textContent = '⚠ La foto no se parece al registro (' + rxCoincidencia + ' %). ¿Seguro que es ' + rxActivoSel.nombre + '?'; }
+  } catch (e) {
+    if (mi === rxReqIA) msg.textContent = 'IA no disponible ahora; la foto se enviará sin validar.';
+  }
+}
+
+function rxLimpiar() {
+  document.getElementById('rxBuscar').value = '';
+  document.getElementById('rxDetalle').value = '';
+  const o = document.getElementById('rxOtro'); o.value = ''; o.classList.add('hidden');
+  rxQuitarFoto();
+  document.getElementById('rxActivo').value = '';
+  rxElegirActivo();
+  rxFiltrarActivos();
+}
+
+function rxEnviar() {
+  if (!rxActivoSel) { showToast('Elige el bien que vas a reportar.'); return; }
+  const seleccion = Array.prototype.map.call(document.querySelectorAll('#rxChips .chip.on[data-obs]'), function (c) { return c.getAttribute('data-obs'); });
+  const inp = document.getElementById('rxOtro');
+  const otro = inp.classList.contains('hidden') ? '' : inp.value.trim();
+  if (!inp.classList.contains('hidden') && !otro) { showToast('Escribe el daño en "Otro" o quítalo.'); return; }
+  if (otro) seleccion.push(otro);
+  const detalle = document.getElementById('rxDetalle').value.trim();
+  if (!seleccion.length && !detalle) { showToast('Marca al menos un tipo de daño o escribe el detalle.'); return; }
+
+  const btn = document.getElementById('rxEnviar');
+  btn.disabled = true;
+  btn.textContent = rxFotoData ? 'Subiendo foto y enviando…' : 'Enviando…';
+  const a = rxActivoSel;
+  llamar('reportarFalla', {
+    id: a.id, nombre: a.nombre, tipoFalla: seleccion.join(', ') || 'Falla', detalle: detalle,
+    reportadoPor: nombreUsuarioActual(), token: tokenSesion(), nuevoEstado: 'En Mantenimiento',
+    foto_base64: rxFotoData || '', coincidenciaIA: rxCoincidencia
+  }).then(function (r) {
+    btn.disabled = false;
+    btn.innerHTML = icono('alerta') + 'Enviar reporte';
+    showToast(r.mensaje || 'Enviado');
+    if (r.exito) { rxLimpiar(); cargarActivos(true); }
+  });
+}
+
+document.getElementById('rxAula').addEventListener('change', function () { rxActivoSel = null; rxFiltrarActivos(); rxElegirActivo(); });
+document.getElementById('rxActivo').addEventListener('change', rxElegirActivo);
+let rxTimer = null;
+document.getElementById('rxBuscar').addEventListener('input', function () {
+  clearTimeout(rxTimer);
+  rxTimer = setTimeout(rxFiltrarActivos, 150);
+});
+</script>

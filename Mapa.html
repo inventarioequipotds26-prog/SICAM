@@ -1,0 +1,284 @@
+<script>
+/* =====================================================================
+   SICAM · js/Mapa — mapa 2D interactivo de la escuela
+     1. Datos por aula (salud = % de bienes en buen estado)
+     2. Vista "Plano": edificios por planta, como un croquis
+     3. Vista "Gráfica": barras apiladas, de la peor aula a la mejor
+     4. Detalle de un aula con sus muebles
+   La estructura de edificios y plantas viene de estructuraEscuela() en el servidor.
+   ===================================================================== */
+
+let datosMapa = null;
+let aulaSeleccionada = null;
+let modoMapa = 'plano';
+let filtroMapa = 'todas';
+let filtroAulaEstado = 'todos';
+let aulasMaestra = null; // [{ nombre, edificio, planta }]
+const ORDEN_EDIFICIOS = ['Edificio Verde', 'Edificio Naranja', 'Edificio Principal'];
+const ETIQUETAS_ESTADO = { bueno: 'Bueno', regular: 'Regular', danado: 'Dañado', mantenimiento: 'Mantenimiento' };
+
+function claseEstadoMapa(estado) { return 'tile-' + grupoEstado(estado); }
+function claveAula(n) { return sinTildes(n).replace(/\s+/g, ' ').trim(); }
+
+function cargarAulasMaestra() {
+  if (aulasMaestra) return Promise.resolve(aulasMaestra);
+  return new Promise(function (resolve) {
+    google.script.run
+      .withSuccessHandler(function (l) { aulasMaestra = l || []; resolve(aulasMaestra); })
+      .withFailureHandler(function () { aulasMaestra = []; resolve(aulasMaestra); })
+      .obtenerAulasMaestra();
+  });
+}
+
+function cargarMapa(forzar) {
+  const grid = document.getElementById('mapaAulasGrid');
+  if (!datosMapa || forzar) grid.innerHTML = '<div class="mapa-loading">Cargando mapa…</div>';
+  if (forzar) aulasMaestra = null;
+  return Promise.all([obtenerActivos(forzar), cargarAulasMaestra()]).then(function () {
+    datosMapa = agruparPorAula(activosVigentes());
+    if (aulaSeleccionada) abrirDetalleAula(aulaSeleccionada);
+    else renderMapaGeneral();
+  });
+}
+
+/** Desde el buscador: abre el mapa directamente en un aula */
+function irAAula(nombre) {
+  mostrarVista('mapa');
+  cargarMapa().then(function () { abrirDetalleAula(nombre); });
+}
+
+/* ---------- 1. DATOS POR AULA ---------- */
+function agruparPorAula(lista) {
+  const porAula = {};
+  const nueva = function (nombre, edificio, planta) {
+    return { nombre: nombre, edificio: edificio || '', planta: planta || '', activos: [], total: 0, bueno: 0, regular: 0, danado: 0, mantenimiento: 0, prestados: 0, valor: 0 };
+  };
+  (aulasMaestra || []).forEach(function (m, i) {
+    const k = claveAula(m.nombre);
+    if (!porAula[k]) { porAula[k] = nueva(m.nombre, m.edificio, m.planta); porAula[k].orden = i; }
+  });
+  const sinUbicacion = nueva('Sin ubicación', '');
+  lista.forEach(function (a) {
+    const ubi = String(a.ubicacion || '').trim();
+    const g = (!ubi || ubi === '—' || ubi.toLowerCase() === 'sin asignar') ? sinUbicacion
+      : (porAula[claveAula(ubi)] || (porAula[claveAula(ubi)] = nueva(ubi, '')));
+    g.activos.push(a); g.total++; g.valor += Number(a.costo) || 0;
+    g[grupoEstado(a.estado)]++;
+    if (a.prestamo) g.prestados++;
+  });
+  const aulas = Object.keys(porAula).map(function (k) { return porAula[k]; });
+  aulas.concat([sinUbicacion]).forEach(function (g) { g.salud = g.total ? Math.round(g.bueno / g.total * 100) : null; });
+  const posEd = function (e) { const i = ORDEN_EDIFICIOS.indexOf(e); return i < 0 ? 99 : i; };
+  aulas.sort(function (x, y) { return (posEd(x.edificio) - posEd(y.edificio)) || ((Number(x.planta) || 0) - (Number(y.planta) || 0)) || ordenAula(x, y); });
+  return { aulas: aulas, sinUbicacion: sinUbicacion, totalActivos: lista.length };
+}
+
+/** Respeta el orden de estructuraEscuela(); los espacios extra van al final por nombre */
+function ordenAula(x, y) {
+  const ox = x.orden == null ? 1e6 : x.orden, oy = y.orden == null ? 1e6 : y.orden;
+  return (ox - oy) || String(x.nombre).localeCompare(String(y.nombre), 'es', { numeric: true });
+}
+
+function nivelSalud(s) {
+  if (s == null) return 'vacia';
+  if (s >= 80) return 'alta';
+  if (s >= 50) return 'media';
+  return 'baja';
+}
+
+function aulasFiltradas() {
+  const q = document.getElementById('mapaBuscar').value.toLowerCase().trim();
+  return datosMapa.aulas.filter(function (g) {
+    if (q && (g.nombre + ' ' + g.edificio).toLowerCase().indexOf(q) < 0) return false;
+    if (filtroMapa === 'problemas') return g.danado + g.mantenimiento > 0;
+    if (filtroMapa === 'danado') return g.danado > 0;
+    if (filtroMapa === 'mant') return g.mantenimiento > 0;
+    return true;
+  });
+}
+
+/** Barra de colores con la proporción de cada estado (los anchos se aplican con pintarAnchos) */
+function segmentosEstado(g, porFlex) {
+  return Object.keys(ETIQUETAS_ESTADO).map(function (k) {
+    if (!g[k]) return '';
+    return '<span class="relleno b-' + k + '" ' + (porFlex ? 'data-flex="' + g[k] + '"' : 'data-w="' + (g[k] / g.total * 100).toFixed(2) + '"') + '></span>';
+  }).join('');
+}
+
+function tooltipAula(g) {
+  if (!g.total) return g.nombre + ': sin mobiliario registrado';
+  return g.nombre + ' · ' + g.total + ' bienes — Bueno ' + g.bueno + ', Regular ' + g.regular + ', Dañado ' + g.danado + ', Mantenimiento ' + g.mantenimiento;
+}
+
+function renderKpisMapa() {
+  const aulas = datosMapa.aulas;
+  const conMueble = aulas.filter(function (g) { return g.total; });
+  const conProb = aulas.filter(function (g) { return g.danado + g.mantenimiento > 0; });
+  const peor = conMueble.slice().sort(function (a, b) { return a.salud - b.salud; })[0];
+  const buenos = aulas.reduce(function (s, g) { return s + g.bueno; }, datosMapa.sinUbicacion.bueno);
+  const salud = datosMapa.totalActivos ? Math.round(buenos / datosMapa.totalActivos * 100) : 0;
+  const kpi = function (num, lbl, cls, accion, arg) {
+    return '<button type="button" class="mapa-kpi ' + (cls || '') + '"' +
+      (accion ? ' data-accion="' + accion + '" data-arg="' + escapeHTML(arg) + '"' : ' disabled') + '>' +
+      '<strong>' + num + '</strong><span>' + lbl + '</span></button>';
+  };
+  document.getElementById('mapaKpis').innerHTML =
+    kpi(conMueble.length + '<small>/' + aulas.length + '</small>', 'Espacios con mobiliario') +
+    kpi(salud + '%', 'Salud general', 'k-' + nivelSalud(salud)) +
+    kpi(conProb.length, 'Espacios con problemas', conProb.length ? 'k-baja' : 'k-alta', 'filtrarMapa', 'problemas') +
+    (peor ? kpi(escapeHTML(peor.nombre), 'El que más necesita atención (' + peor.salud + '%)', 'k-texto', 'abrirDetalleAula', peor.nombre) : '');
+}
+
+function renderMapaGeneral() {
+  if (!datosMapa) return;
+  document.getElementById('mapaGeneral').classList.remove('hidden');
+  document.getElementById('mapaDetalleCard').classList.add('hidden');
+  renderKpisMapa();
+  const grid = document.getElementById('mapaAulasGrid');
+  const lista = aulasFiltradas();
+  const sinUbi = datosMapa.sinUbicacion;
+  if (!datosMapa.aulas.length && !sinUbi.total) { grid.innerHTML = '<div class="mapa-loading">No hay aulas ni bienes con ubicación todavía.</div>'; return; }
+  if (!lista.length) { grid.innerHTML = '<div class="mapa-loading">Ningún espacio coincide con el filtro.</div>'; return; }
+  grid.innerHTML = (modoMapa === 'grafica' ? htmlGraficaAulas(lista) : htmlPlanoAulas(lista)) +
+    (sinUbi.total && filtroMapa === 'todas'
+      ? botonAccion('aula-sin', 'abrirDetalleAula', '__SIN__', '⚠ ' + plural(sinUbi.total, 'bien', 'bienes') + ' sin aula asignada · ver')
+      : '');
+  pintarAnchos(grid);
+}
+
+/* ---------- 2. PLANO ---------- */
+function htmlPlanoAulas(lista) {
+  const grupos = {};
+  lista.forEach(function (g) { const ed = g.edificio || 'Otros espacios'; (grupos[ed] = grupos[ed] || []).push(g); });
+  const orden = Object.keys(grupos).sort(function (a, b) {
+    const ia = ORDEN_EDIFICIOS.indexOf(a), ib = ORDEN_EDIFICIOS.indexOf(b);
+    return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib) || a.localeCompare(b, 'es');
+  });
+  return orden.map(function (ed) {
+    const aulas = grupos[ed];
+    const tot = aulas.reduce(function (s, g) { return s + g.total; }, 0);
+    const plantas = {};
+    aulas.forEach(function (g) { (plantas[g.planta || 0] = plantas[g.planta || 0] || []).push(g); });
+    // La 2.ª planta se dibuja arriba de la 1.ª, como en el edificio real
+    const numeros = Object.keys(plantas).sort(function (a, b) { return Number(b) - Number(a); });
+    const claseEd = 'edificio-' + sinTildes(ed).replace(/^edificio\s+/, '').replace(/\s+/g, '-');
+    return '<section class="edificio ' + claseEd + '">' +
+      '<div class="edificio-head"><strong>' + escapeHTML(ed) + '</strong><span>' + plural(aulas.length, 'espacio', 'espacios') + ' · ' + plural(tot, 'bien', 'bienes') + '</span></div>' +
+      numeros.map(function (p) {
+        return '<div class="planta">' + (Number(p) ? '<span class="planta-lbl">' + p + '.ª planta</span>' : '') +
+          '<div class="plano-grid">' + plantas[p].slice().sort(ordenAula).map(htmlSalon).join('') + '</div></div>';
+      }).join('') + '</section>';
+  }).join('');
+}
+
+function htmlSalon(g) {
+  const prob = g.danado + g.mantenimiento;
+  return '<button type="button" class="salon salud-' + nivelSalud(g.salud) + '" title="' + escapeHTML(tooltipAula(g)) + '" data-accion="abrirDetalleAula" data-arg="' + escapeHTML(g.nombre) + '">' +
+    '<span class="salon-nombre">' + escapeHTML(g.nombre) + '</span>' +
+    '<span class="salon-salud">' + (g.salud == null ? '—' : g.salud + '%') + '</span>' +
+    '<span class="salon-meta">' + (g.total ? plural(g.total, 'bien', 'bienes') : 'vacía') + (prob ? ' · <b>' + prob + ' ⚠</b>' : '') +
+    (g.prestados ? ' · ' + g.prestados + ' prestado' + (g.prestados > 1 ? 's' : '') : '') + '</span>' +
+    (g.total ? '<span class="barra-estados">' + segmentosEstado(g, false) + '</span>' : '<span class="barra-estados vacia"></span>') +
+  '</button>';
+}
+
+/* ---------- 3. GRÁFICA ---------- */
+function htmlGraficaAulas(lista) {
+  const conDatos = lista.filter(function (g) { return g.total; }).sort(function (a, b) { return (a.salud - b.salud) || (b.total - a.total); });
+  if (!conDatos.length) return '<div class="mapa-loading">Los espacios filtrados no tienen mobiliario.</div>';
+  const max = Math.max.apply(null, conDatos.map(function (g) { return g.total; }));
+  return '<div class="dash-card grafica-aulas"><p class="section-label">Ordenadas por salud (peor primero) · toca una barra para abrir el aula</p>' +
+    conDatos.map(function (g) {
+      return '<button type="button" class="gbar-row" title="' + escapeHTML(tooltipAula(g)) + '" data-accion="abrirDetalleAula" data-arg="' + escapeHTML(g.nombre) + '">' +
+        '<span class="gbar-lbl">' + escapeHTML(g.nombre) + '</span>' +
+        '<span class="gbar-track"><span class="relleno gbar-fill" data-w="' + Math.max(4, g.total / max * 100).toFixed(2) + '">' + segmentosEstado(g, true) + '</span></span>' +
+        '<span class="gbar-val">' + g.total + ' · <b class="t-' + nivelSalud(g.salud) + '">' + g.salud + '%</b></span></button>';
+    }).join('') + '</div>';
+}
+
+function cambiarModoMapa(modo) {
+  modoMapa = modo;
+  document.getElementById('mapaModoPlano').classList.toggle('on', modo === 'plano');
+  document.getElementById('mapaModoGrafica').classList.toggle('on', modo === 'grafica');
+  if (aulaSeleccionada) cerrarDetalleAula(); else renderMapaGeneral();
+}
+
+function filtrarMapa(f) {
+  filtroMapa = f;
+  document.querySelectorAll('#mapaFiltros .chip').forEach(function (c) { c.classList.toggle('on', c.dataset.f === f); });
+  renderMapaGeneral();
+}
+
+/* ---------- 4. DETALLE DE UN AULA ---------- */
+function datosAula(nombre) {
+  if (nombre === '__SIN__') return datosMapa.sinUbicacion;
+  const k = claveAula(nombre);
+  return datosMapa.aulas.find(function (a) { return claveAula(a.nombre) === k; }) || null;
+}
+
+function abrirDetalleAula(nombre) {
+  if (!datosMapa) return;
+  const g = datosAula(nombre);
+  if (!g) { cerrarDetalleAula(); return; }
+  if (aulaSeleccionada !== nombre) filtroAulaEstado = 'todos';
+  aulaSeleccionada = nombre;
+
+  document.getElementById('mapaGeneral').classList.add('hidden');
+  document.getElementById('mapaDetalleCard').classList.remove('hidden');
+  document.getElementById('mapaDetalleEdificio').textContent = (g.edificio || 'Espacio') + (Number(g.planta) ? ' · ' + g.planta + '.ª planta' : '');
+  document.getElementById('mapaDetalleTitulo').textContent = g.nombre;
+  document.getElementById('mapaDetalleCount').textContent = plural(g.total, 'bien', 'bienes') + (g.prestados ? ' · ' + g.prestados + ' prestado(s)' : '');
+  document.getElementById('aulaSalud').textContent = g.salud == null ? '—' : g.salud + '%';
+  document.getElementById('aulaValor').textContent = g.total ? 'Valor estimado: ' + dinero(g.valor) : '';
+  dibujarDona(document.getElementById('aulaDonut'), g);
+
+  const etiquetas = Object.assign({ todos: 'Todos' }, ETIQUETAS_ESTADO);
+  document.getElementById('aulaFiltros').innerHTML = Object.keys(etiquetas).map(function (k) {
+    const n = k === 'todos' ? g.total : g[k];
+    if (k !== 'todos' && !n) return '';
+    return '<button type="button" class="aula-filtro' + (filtroAulaEstado === k ? ' on' : '') + '" data-accion="filtrarAula" data-arg="' + k + '">' +
+      (k === 'todos' ? '' : '<i class="dot dot-' + k + '"></i>') + '<span>' + etiquetas[k] + '</span><b>' + n + '</b></button>';
+  }).join('');
+
+  const orden = { danado: 0, mantenimiento: 1, regular: 2, bueno: 3 };
+  const activos = g.activos.filter(function (a) { return filtroAulaEstado === 'todos' || grupoEstado(a.estado) === filtroAulaEstado; })
+    .sort(function (a, b) { return orden[grupoEstado(a.estado)] - orden[grupoEstado(b.estado)]; });
+  document.getElementById('mapaDetalleEmpty').classList.toggle('hidden', activos.length > 0);
+  document.getElementById('aulaGrid').innerHTML = activos.map(function (a) {
+    const idCorto = a.id.length > 14 ? a.id.slice(-9) : a.id;
+    return '<button type="button" class="espacio-mueble ' + claseEstadoMapa(a.estado) + '" title="' + escapeHTML(a.nombre + ' · ' + a.id + ' · ' + a.estado) + '" data-accion="abrirMueble" data-arg="' + escapeHTML(a.id) + '">' +
+      '<span class="mueble-nombre">' + escapeHTML(a.nombre || 'Sin nombre') + '</span>' +
+      '<span class="mueble-id">' + escapeHTML(idCorto) + '</span>' +
+      '<span class="mueble-estado">' + escapeHTML(a.estado || '—') + '</span>' +
+      (a.prestamo ? '<span class="mueble-prestado">Prestado · ' + escapeHTML(a.prestamo) + '</span>' : '') +
+    '</button>';
+  }).join('');
+  window.scrollTo(0, 0);
+}
+
+function filtrarAula(k) { filtroAulaEstado = k; abrirDetalleAula(aulaSeleccionada); }
+
+function moverAula(paso) {
+  const lista = aulasFiltradas().filter(function (g) { return g.total; });
+  if (!lista.length) return;
+  let i = lista.findIndex(function (g) { return g.nombre === aulaSeleccionada; });
+  i = (i + paso + lista.length) % lista.length;
+  abrirDetalleAula(lista[i].nombre);
+}
+
+function cerrarDetalleAula() {
+  aulaSeleccionada = null;
+  cerrarMueble();
+  renderMapaGeneral();
+}
+
+document.getElementById('mapaFiltros').addEventListener('click', function (e) {
+  const b = e.target.closest('.chip');
+  if (b) filtrarMapa(b.dataset.f);
+});
+let mapaTimer = null;
+document.getElementById('mapaBuscar').addEventListener('input', function () {
+  clearTimeout(mapaTimer);
+  mapaTimer = setTimeout(renderMapaGeneral, 150);
+});
+</script>

@@ -1,0 +1,223 @@
+<script>
+/* =====================================================================
+   SICAM · js/Inicio — panel de Inicio
+   Índice de salud, métricas, gráfica de estados, categorías,
+   presupuesto estimado, bienes que requieren atención y últimos registros.
+   También arma el "Informe para Dirección" (directivos y administradores).
+   (El cuadro de préstamos lo llena js/Prestamos.)
+   ===================================================================== */
+
+const ESTADOS_GRAFICA = [
+  { k: 'bueno', lbl: 'Bueno' },
+  { k: 'regular', lbl: 'Regular' },
+  { k: 'danado', lbl: 'Dañado' },
+  { k: 'mantenimiento', lbl: 'Mantenimiento' }
+];
+
+/** Clasifica un estado en bueno / regular / dañado / mantenimiento ("Para Baja" cuenta como dañado) */
+function grupoEstado(estado) {
+  const e = String(estado || '').toLowerCase();
+  if (e.indexOf('manten') >= 0) return 'mantenimiento';
+  if (e.indexOf('dañ') >= 0 || e.indexOf('dan') >= 0 || e.indexOf('roto') >= 0 || e.indexOf('baja') >= 0) return 'danado';
+  if (e.indexOf('regular') >= 0) return 'regular';
+  return 'bueno';
+}
+
+function actualizarDashboard() {
+  const vigentes = activosVigentes();
+  const total = vigentes.length;
+  const cuenta = { bueno: 0, regular: 0, danado: 0, mantenimiento: 0 };
+  const atencion = [];
+  const porCategoria = {};
+
+  vigentes.forEach(function (a) {
+    const g = grupoEstado(a.estado);
+    cuenta[g]++;
+    if (g === 'danado' || g === 'mantenimiento') atencion.push(a);
+    const cat = String(a.categoria || '').trim() || 'Sin categoría';
+    porCategoria[cat] = (porCategoria[cat] || 0) + 1;
+  });
+
+  const salud = total ? Math.round((cuenta.bueno / total) * 100) : 100;
+  document.getElementById('statTotal').textContent = total;
+  document.getElementById('statBueno').textContent = cuenta.bueno;
+  document.getElementById('statRegular').textContent = cuenta.regular;
+  document.getElementById('statAtencion').textContent = cuenta.danado + cuenta.mantenimiento;
+  document.getElementById('statSalud').textContent = salud;
+  document.getElementById('healthSub').textContent = total ? cuenta.bueno + ' de ' + total + ' en buen estado' : 'Sin activos registrados';
+
+  // Anillo de salud: el color depende del nivel (clases ring-alta / ring-media / ring-baja)
+  const circulo = document.getElementById('healthCircle');
+  const circ = 2 * Math.PI * 34;
+  circulo.setAttribute('stroke-dasharray', String(circ));
+  circulo.setAttribute('stroke-dashoffset', String(circ * (1 - salud / 100)));
+  circulo.setAttribute('class', 'ring-fill ring-' + (salud >= 80 ? 'alta' : salud >= 50 ? 'media' : 'baja'));
+
+  renderDonutEstados(cuenta);
+  renderBarrasCategorias(porCategoria);
+  pintarProyeccion(calcularProyeccionLocal());
+  renderAtencion(atencion);
+  renderTimeline();
+}
+
+/** Dibuja segmentos de dona dentro de un <svg> (los usa también el mapa) */
+function dibujarDona(svg, cuenta) {
+  svg.querySelectorAll('.donut-seg').forEach(function (s) { s.remove(); });
+  const total = ESTADOS_GRAFICA.reduce(function (s, e) { return s + (cuenta[e.k] || 0); }, 0);
+  if (!total) return 0;
+  let acumulado = 0;
+  ESTADOS_GRAFICA.forEach(function (e) {
+    const val = cuenta[e.k] || 0;
+    if (!val) return;
+    const pct = val / total * 100;
+    const c = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+    c.setAttribute('class', 'donut-seg seg-' + e.k);
+    c.setAttribute('cx', '21'); c.setAttribute('cy', '21'); c.setAttribute('r', '15.915');
+    c.setAttribute('stroke-dasharray', pct + ' ' + (100 - pct));
+    c.setAttribute('stroke-dashoffset', String(100 - acumulado));
+    svg.appendChild(c);
+    acumulado += pct;
+  });
+  return total;
+}
+
+function renderDonutEstados(cuenta) {
+  const total = dibujarDona(document.getElementById('donutEstados'), cuenta);
+  document.getElementById('donutTotal').textContent = total;
+  const leyenda = document.getElementById('donutLeyenda');
+  if (!total) { leyenda.innerHTML = '<div class="hist-vacio">Sin datos.</div>'; return; }
+  leyenda.innerHTML = ESTADOS_GRAFICA.map(function (e) {
+    const val = cuenta[e.k] || 0;
+    return '<div class="leyenda-row"><i class="dot dot-' + e.k + '"></i><span>' + e.lbl + '</span>' +
+      '<b>' + val + ' · ' + Math.round(val / total * 100) + '%</b></div>';
+  }).join('');
+}
+
+function renderBarrasCategorias(porCategoria) {
+  const box = document.getElementById('barrasCategorias');
+  const arr = Object.keys(porCategoria).map(function (k) { return { nombre: k, valor: porCategoria[k] }; })
+    .sort(function (a, b) { return b.valor - a.valor; }).slice(0, 5);
+  if (!arr.length) { box.innerHTML = '<div class="hist-vacio">Sin datos todavía.</div>'; return; }
+  const max = arr[0].valor || 1;
+  box.innerHTML = arr.map(function (c) {
+    return '<div class="barra-item"><div class="barra-top">' +
+      '<span class="barra-lbl">' + escapeHTML(c.nombre) + '</span><span class="barra-val">' + c.valor + '</span></div>' +
+      '<div class="barra-track"><span class="relleno barra-fill" data-w="' + Math.round(c.valor / max * 100) + '"></span></div></div>';
+  }).join('');
+  pintarAnchos(box);
+}
+
+/** Misma fórmula que obtenerProyeccionPresupuesto() del servidor: reponer dañados y reparar (20 %) los de mantenimiento */
+function calcularProyeccionLocal() {
+  let reposicion = 0, reparacion = 0, danados = 0, enMant = 0;
+  activosVigentes().forEach(function (a) {
+    const base = Number(a.costo) > 0 ? Number(a.costo) : 350;
+    const g = grupoEstado(a.estado);
+    if (g === 'danado') { reposicion += base; danados++; }
+    else if (g === 'mantenimiento') { reparacion += base * 0.20; enMant++; }
+  });
+  return { reposicion: reposicion, reparacion: reparacion, total: reposicion + reparacion, danados: danados, enMant: enMant };
+}
+
+function pintarProyeccion(p) {
+  document.getElementById('proyTotal').textContent = dinero(p.total);
+  document.getElementById('proyReposicion').textContent = dinero(p.reposicion);
+  document.getElementById('proyReparacion').textContent = dinero(p.reparacion);
+  document.getElementById('proyDetalle').textContent = plural(p.danados, 'bien dañado', 'bienes dañados') + ' para reponer · ' +
+    p.enMant + ' en mantenimiento. Si un bien no tiene costo, se calculan $350.';
+}
+
+function renderAtencion(lista) {
+  const box = document.getElementById('atencionList');
+  if (!lista.length) {
+    box.innerHTML = '<div class="atencion-empty">Todo en orden. No hay bienes dañados ni en mantenimiento.</div>';
+    return;
+  }
+  lista.sort(function (a, b) { return (grupoEstado(a.estado) === 'mantenimiento' ? 0 : 1) - (grupoEstado(b.estado) === 'mantenimiento' ? 0 : 1); });
+  box.innerHTML = lista.slice(0, 8).map(function (a) {
+    const mant = grupoEstado(a.estado) === 'mantenimiento';
+    return '<div class="atencion-row">' +
+      botonAccion('atencion-item', 'abrirMueble', a.id,
+        '<span class="atencion-dot ' + (mant ? 'd-mant' : 'd-dan') + '"></span>' +
+        '<span class="atencion-body"><span class="atencion-name">' + escapeHTML(a.nombre || 'Sin nombre') + '</span>' +
+        '<span class="atencion-meta">' + escapeHTML(a.ubicacion || 'Sin ubicación') + ' · ' + escapeHTML(a.id) + '</span></span>' +
+        '<span class="atencion-badge status ' + claseEstado(a.estado) + '">' + escapeHTML(a.estado) + '</span>') +
+      (necesitaReparar(a.estado) ? botonAccion('btn-reparado', 'abrirReparado', a.id, '✔ Reparado') : '') +
+      '</div>';
+  }).join('');
+}
+
+function renderTimeline() {
+  const box = document.getElementById('ultimosTimeline');
+  if (!todosLosActivos.length) { box.innerHTML = '<div class="timeline-empty">Sin registros aún.</div>'; return; }
+  box.innerHTML = todosLosActivos.slice(-6).reverse().map(function (a) {
+    return '<div class="tl-item"><span class="tl-dot"></span><div class="tl-body">' +
+      '<div class="tl-name">' + escapeHTML(a.nombre || 'Sin nombre') + '</div>' +
+      '<div class="tl-meta">' + escapeHTML(a.ubicacion || '—') + ' · <span class="status ' + claseEstado(a.estado) + '">' +
+      escapeHTML(a.estado || '—') + '</span></div></div></div>';
+  }).join('');
+}
+/* ---------- INFORME PARA DIRECCIÓN (resumen ejecutivo de una página) ---------- */
+function informeDireccion() {
+  showToast('Preparando el informe…');
+  Promise.all([obtenerActivos(), cargarPrestamos()]).then(function () {
+    const vigentes = activosVigentes();
+    const cuenta = { bueno: 0, regular: 0, danado: 0, mantenimiento: 0 };
+    let valor = 0, paraBaja = 0;
+    const porAula = {};
+    vigentes.forEach(function (a) {
+      const g = grupoEstado(a.estado);
+      cuenta[g]++;
+      valor += Number(a.costo) || 0;
+      if (/para baja/i.test(a.estado || '')) paraBaja++;
+      const aula = a.ubicacion || 'Sin aula';
+      porAula[aula] = porAula[aula] || { total: 0, mal: 0 };
+      porAula[aula].total++;
+      if (g === 'danado' || g === 'mantenimiento') porAula[aula].mal++;
+    });
+    const total = vigentes.length;
+    const salud = total ? Math.round(cuenta.bueno / total * 100) : 100;
+    const proy = calcularProyeccionLocal();
+    const lista = prestamos || [];
+    const activos = lista.filter(function (p) { return p.estado === 'Activo'; });
+    const vencidos = lista.filter(prVencido);
+    const perdidos = lista.filter(function (p) { return p.estado === 'Perdido'; });
+    const peores = Object.keys(porAula).map(function (k) { return { aula: k, total: porAula[k].total, mal: porAula[k].mal }; })
+      .filter(function (x) { return x.mal > 0; })
+      .sort(function (a, b) { return b.mal / b.total - a.mal / a.total || b.mal - a.mal; }).slice(0, 5);
+
+    const filasVencidos = vencidos.length ? vencidos.map(function (p) {
+      return '<tr><td>' + escapeHTML(p.id) + '</td><td>' + escapeHTML(p.nombre) + '</td><td>' + escapeHTML(p.tipoPersona) + '</td><td>' +
+        escapeHTML(p.bienes) + '</td><td>' + escapeHTML(p.limite) + '</td><td>' + escapeHTML(p.estado) + '</td></tr>';
+    }).join('') : '<tr><td colspan="6">No hay préstamos vencidos.</td></tr>';
+    const filasAulas = peores.length ? peores.map(function (x) {
+      return '<tr><td>' + escapeHTML(x.aula) + '</td><td>' + x.total + '</td><td>' + x.mal + '</td><td>' + Math.round((1 - x.mal / x.total) * 100) + '%</td></tr>';
+    }).join('') : '<tr><td colspan="4">Ninguna aula tiene bienes dañados.</td></tr>';
+
+    imprimirHoja(
+      encabezadoOficial('Informe para Dirección', escapeHTML(new Date().toLocaleString('es-SV'))) +
+      '<p class="inf-texto">Resumen del estado del mobiliario y equipo del centro escolar, generado por SICAM con los datos registrados hasta hoy.</p>' +
+      '<h2 class="inf-sub">1. Estado general</h2>' +
+      '<table class="inf-resumen"><tr>' +
+        '<td><b>' + total + '</b>Bienes</td><td><b>' + dinero(valor) + '</b>Valor estimado</td><td><b>' + salud + '%</b>Índice de salud</td>' +
+        '<td><b>' + cuenta.bueno + '</b>Bueno</td><td><b>' + cuenta.regular + '</b>Regular</td><td><b>' + cuenta.danado + '</b>Dañado</td>' +
+        '<td><b>' + cuenta.mantenimiento + '</b>Mantenimiento</td><td><b>' + paraBaja + '</b>Para baja</td>' +
+      '</tr></table>' +
+      '<h2 class="inf-sub">2. Presupuesto estimado</h2>' +
+      '<table class="inf-resumen"><tr>' +
+        '<td><b>' + dinero(proy.reposicion) + '</b>Reponer ' + plural(proy.danados, 'bien dañado', 'bienes dañados') + '</td>' +
+        '<td><b>' + dinero(proy.reparacion) + '</b>Reparar ' + proy.enMant + ' en mantenimiento</td>' +
+        '<td><b>' + dinero(proy.total) + '</b>Total</td>' +
+      '</tr></table>' +
+      '<h2 class="inf-sub">3. Préstamos</h2>' +
+      '<p class="inf-filtros">' + plural(activos.length, 'préstamo activo', 'préstamos activos') + ' · ' +
+        plural(vencidos.length, 'vencido o no devuelto', 'vencidos o no devueltos') + ' · ' + plural(perdidos.length, 'pérdida', 'pérdidas') + '.</p>' +
+      '<table class="inf-tabla"><thead><tr><th>N.º</th><th>Persona</th><th>Tipo</th><th>Bienes</th><th>Devolver</th><th>Estado</th></tr></thead><tbody>' + filasVencidos + '</tbody></table>' +
+      '<h2 class="inf-sub">4. Aulas que necesitan atención</h2>' +
+      '<table class="inf-tabla"><thead><tr><th>Aula</th><th>Bienes</th><th>Dañados o en mantenimiento</th><th>Salud</th></tr></thead><tbody>' + filasAulas + '</tbody></table>' +
+      '<div class="inf-firmas"><div><span></span>Encargado(a) de inventario</div><div><span></span>Subdirector(a)</div><div><span></span>Director(a) · Sello</div></div>'
+    );
+    showToast('En la ventana de impresión elige “Guardar como PDF”.');
+  });
+}
+</script>

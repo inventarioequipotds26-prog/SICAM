@@ -1,0 +1,1372 @@
+<!DOCTYPE html>
+<!--
+  SICAM · Sistema de Control de Activos y Mobiliario
+  Centro Escolar General Francisco Morazán (código 11532)
+
+  Index: estructura (HTML5 semántico) de la aplicación.
+  - Estilos:     css/Estilos
+  - JavaScript:  js/Tema (en <head>), js/App (núcleo), js/Inicio, js/Inventario, js/Registro,
+                 js/Escaner, js/Mapa, js/Gestion y js/Prestamos.
+  - Servidor:    config/Config.gs y server/*.gs (Google Apps Script).
+  - No hay estilos en línea ni onclick: los botones usan atributos data-* (ver js/App, sección 8).
+-->
+<html lang="es">
+<head>
+  <base target="_top">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="SICAM: control de mobiliario y equipo del Centro Escolar General Francisco Morazán">
+  <title>SICAM · Inventario CEFRAM</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@800&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+  <!-- Aplica el tema guardado antes de pintar (evita un destello blanco en modo oscuro) -->
+  <?!= include('js/Tema'); ?>
+  <?!= include('css/Estilos'); ?>
+</head>
+<body>
+
+  <!-- Íconos SVG (se usan con <svg class="ic"><use href="#i-nombre"/></svg>) -->
+  <?!= include('Iconos'); ?>
+
+  <!-- ===== MENÚ LATERAL ===== -->
+  <aside class="sidebar" id="sidebar" aria-label="Menú principal">
+    <div class="brand">
+      <div>
+        <h2 class="sr-only">SICAM</h2>
+        <div class="logo"><svg class="logo-marca" aria-hidden="true"><use href="#logo-marca"/></svg><span class="logo-txt">SICAM</span></div>
+        <p>Control de mobiliario · CEFRAM</p>
+      </div>
+      <button type="button" class="icon-btn cerrar-menu" data-accion="cerrarMenu" aria-label="Cerrar menú">
+        <svg class="ic"><use href="#i-cerrar"/></svg>
+      </button>
+    </div>
+
+    <nav class="navigation">
+      <p class="nav-grupo">Principal</p>
+      <button type="button" class="nav-link active" data-vista="inicio" data-accion="mostrarVista" data-arg="inicio">
+        <svg class="ic"><use href="#i-inicio"/></svg><span>Inicio</span>
+      </button>
+      <button type="button" class="nav-link" data-vista="inventario" data-accion="mostrarVista" data-arg="inventario">
+        <svg class="ic"><use href="#i-caja"/></svg><span>Inventario</span>
+      </button>
+      <button type="button" class="nav-link" data-vista="mapa" data-accion="mostrarVista" data-arg="mapa">
+        <svg class="ic"><use href="#i-mapa"/></svg><span>Mapa 2D</span>
+      </button>
+
+      <p class="nav-grupo">Operación diaria</p>
+      <button type="button" class="nav-link" data-vista="escanear" data-accion="mostrarVista" data-arg="escanear">
+        <svg class="ic"><use href="#i-escanear"/></svg><span>Escanear QR</span>
+      </button>
+      <button type="button" class="nav-link" data-vista="reporte" data-accion="mostrarVista" data-arg="reporte">
+        <svg class="ic"><use href="#i-alerta"/></svg><span>Reportar falla</span>
+      </button>
+      <button type="button" class="nav-link" data-solo="admin directivo" data-vista="prestamos" data-accion="mostrarVista" data-arg="prestamos">
+        <svg class="ic"><use href="#i-prestamo"/></svg><span>Préstamos</span><b class="nav-badge hidden" id="navBadgePrestamos"></b>
+      </button>
+
+      <p class="nav-grupo" data-solo="admin directivo">Administración</p>
+      <button type="button" class="nav-link" data-solo="admin directivo" data-vista="gestion" data-accion="mostrarVista" data-arg="gestion">
+        <svg class="ic"><use href="#i-gestion"/></svg><span>Gestión</span>
+      </button>
+      <button type="button" class="nav-link" data-solo="admin" data-vista="registrar" data-accion="mostrarVista" data-arg="registrar">
+        <svg class="ic"><use href="#i-mas"/></svg><span>Registrar bien</span>
+      </button>
+      <button type="button" class="nav-link" data-solo="admin" data-vista="qr" data-accion="mostrarVista" data-arg="qr">
+        <svg class="ic"><use href="#i-qr"/></svg><span>Etiquetas QR</span>
+      </button>
+      <button type="button" class="nav-link" data-vista="ayuda" data-accion="mostrarVista" data-arg="ayuda">
+        <svg class="ic"><use href="#i-ayuda"/></svg><span>Guía de uso</span>
+      </button>
+    </nav>
+
+    <div class="user-info" id="userInfoBox">
+      <div class="user-avatar" id="userAvatar">U</div>
+      <div class="user-meta">
+        <span class="user-name" id="userNameDisplay">—</span>
+        <span class="user-role" id="userRoleDisplay">—</span>
+      </div>
+      <button class="icon-btn logout-btn" type="button" data-accion="cerrarSesion" title="Cerrar sesión" aria-label="Cerrar sesión">
+        <svg class="ic"><use href="#i-salir"/></svg>
+      </button>
+    </div>
+  </aside>
+  <div class="menu-velo" id="menuVelo" data-accion="cerrarMenu"></div>
+
+  <!-- ===== BARRA SUPERIOR ===== -->
+  <header class="topbar">
+    <button class="icon-btn menu-toggle" id="menuToggle" type="button" aria-label="Abrir menú">
+      <svg class="ic"><use href="#i-menu"/></svg>
+    </button>
+    <button type="button" class="buscador" data-accion="abrirPaleta">
+      <svg class="ic"><use href="#i-buscar"/></svg>
+      <span>Buscar un bien, aula, préstamo o acción…</span>
+      <kbd>Ctrl K</kbd>
+    </button>
+    <div class="topbar-acciones">
+      <button type="button" class="icon-btn" id="btnTema" data-accion="alternarTema" title="Cambiar a modo oscuro" aria-label="Cambiar tema">
+        <svg class="ic ic-luna"><use href="#i-luna"/></svg>
+        <svg class="ic ic-sol"><use href="#i-sol"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <main class="main-content" id="contenido">
+
+    <!-- ===== INICIO (panel tipo "bento") ===== -->
+    <section class="vista activa" id="vistaInicio" aria-labelledby="saludoNombre">
+      <div class="bento">
+        <article class="tile tile-hero">
+          <div class="hero-texto">
+            <p class="hero-fecha" id="saludoFecha">SICAM · CEFRAM</p>
+            <h1 id="saludoNombre">Bienvenido</h1>
+            <p class="hero-rol" id="heroRol">Panel</p>
+            <p class="hero-desc" id="heroDesc">Así está hoy el mobiliario y el equipo del centro escolar.</p>
+            <div class="hero-acciones">
+              <button type="button" class="hero-btn" data-accion="mostrarVista" data-arg="escanear">
+                <svg class="ic"><use href="#i-escanear"/></svg>Escanear
+              </button>
+              <button type="button" class="hero-btn" data-accion="mostrarVista" data-arg="reporte">
+                <svg class="ic"><use href="#i-alerta"/></svg>Reportar falla
+              </button>
+              <button type="button" class="hero-btn" data-solo="admin" data-accion="nuevoPrestamo">
+                <svg class="ic"><use href="#i-prestamo"/></svg>Prestar
+              </button>
+              <button type="button" class="hero-btn" data-solo="admin directivo" data-accion="informeDireccion">
+                <svg class="ic"><use href="#i-imprimir"/></svg>Informe para Dirección
+              </button>
+            </div>
+          </div>
+          <div class="dash-health" id="dashHealth">
+            <div class="health-ring" id="healthRing">
+              <svg viewBox="0 0 80 80" aria-hidden="true">
+                <circle class="ring-bg" cx="40" cy="40" r="34"/>
+                <circle class="ring-fill" id="healthCircle" cx="40" cy="40" r="34" stroke-dasharray="213.6" stroke-dashoffset="213.6"/>
+              </svg>
+              <div class="health-pct"><strong id="statSalud">—</strong><small>%</small></div>
+            </div>
+            <p class="health-label">Índice de salud</p>
+            <p class="health-sub" id="healthSub">Calculando…</p>
+          </div>
+        </article>
+
+        <div class="dash-metrics">
+          <article class="metric-pill">
+            <span class="metric-ic"><svg class="ic"><use href="#i-caja"/></svg></span>
+            <span class="metric-num" id="statTotal">0</span><span class="metric-lbl">Activos</span>
+          </article>
+          <article class="metric-pill pill-ok">
+            <span class="metric-ic"><svg class="ic"><use href="#i-check"/></svg></span>
+            <span class="metric-num" id="statBueno">0</span><span class="metric-lbl">En buen estado</span>
+          </article>
+          <article class="metric-pill pill-warn">
+            <span class="metric-ic"><svg class="ic"><use href="#i-reloj"/></svg></span>
+            <span class="metric-num" id="statRegular">0</span><span class="metric-lbl">Regular</span>
+          </article>
+          <article class="metric-pill pill-alert">
+            <span class="metric-ic"><svg class="ic"><use href="#i-alerta"/></svg></span>
+            <span class="metric-num" id="statAtencion">0</span><span class="metric-lbl">Necesitan atención</span>
+          </article>
+        </div>
+
+        <article class="tile">
+          <header class="tile-head">
+            <div><p class="section-label">Distribución</p><h2>Estado del inventario</h2></div>
+          </header>
+          <div class="chart-donut-wrap">
+            <div class="donut-rel">
+              <svg class="chart-donut" viewBox="0 0 42 42" id="donutEstados"><circle class="donut-ring" cx="21" cy="21" r="15.915"></circle></svg>
+              <div class="chart-donut-center"><strong id="donutTotal">0</strong><small>activos</small></div>
+            </div>
+            <div class="donut-leyenda" id="donutLeyenda"></div>
+          </div>
+        </article>
+
+        <article class="tile">
+          <header class="tile-head">
+            <div><p class="section-label">Categorías</p><h2>Las 5 más numerosas</h2></div>
+          </header>
+          <div class="barras-list" id="barrasCategorias"><div class="hist-vacio">Sin datos todavía.</div></div>
+        </article>
+
+        <article class="tile tile-prestamos" data-solo="admin directivo">
+          <header class="tile-head">
+            <div><p class="section-label">Préstamos</p><h2>Fuera de la escuela</h2></div>
+            <button class="secondary-button btn-sm" type="button" data-accion="mostrarVista" data-arg="prestamos">Ver</button>
+          </header>
+          <div class="dash-prest">
+            <div><strong id="dashPrestActivos">0</strong><span>activos</span></div>
+            <div class="vencido"><strong id="dashPrestVencidos">0</strong><span>vencidos</span></div>
+          </div>
+          <div class="dash-prest-lista" id="dashPrestLista"><div class="hist-vacio">Sin préstamos pendientes.</div></div>
+        </article>
+
+        <article class="tile" data-solo="admin directivo">
+          <header class="tile-head">
+            <div><p class="section-label">Proyección</p><h2>Presupuesto estimado</h2></div>
+          </header>
+          <span class="proy-valor" id="proyTotal">$0.00</span>
+          <p class="proy-sub">Lo que costaría reponer los bienes dañados y reparar los que están en mantenimiento.</p>
+          <div class="proy-desglose">
+            <div class="proy-item dan"><span class="lbl">Reposición</span><span class="val" id="proyReposicion">$0.00</span></div>
+            <div class="proy-item rep"><span class="lbl">Reparación</span><span class="val" id="proyReparacion">$0.00</span></div>
+          </div>
+          <p class="proy-sub proy-detalle" id="proyDetalle">—</p>
+        </article>
+
+        <article class="tile tile-ancho">
+          <header class="tile-head">
+            <div><p class="section-label">Prioridad</p><h2>Requieren atención</h2></div>
+            <button class="secondary-button btn-sm" type="button" data-accion="mostrarVista" data-arg="inventario">Ver todo</button>
+          </header>
+          <div class="atencion-list" id="atencionList">
+            <div class="atencion-empty">Todo en orden. No hay activos dañados ni en mantenimiento.</div>
+          </div>
+        </article>
+
+        <article class="tile">
+          <header class="tile-head">
+            <div><p class="section-label">Actividad</p><h2>Últimos registros</h2></div>
+          </header>
+          <div class="timeline" id="ultimosTimeline"><div class="timeline-empty">Sin registros aún.</div></div>
+        </article>
+      </div>
+    </section>
+
+    <!-- ===== INVENTARIO ===== -->
+    <section class="vista" id="vistaInventario">
+      <header class="top-header">
+        <div class="header-text">
+          <p class="section-label">Inventario</p>
+          <h1>Mobiliario y equipo</h1>
+          <p class="header-description">Busca, filtra, edita o abre la ficha de cada bien. Lo que exportes será exactamente lo que ves en la tabla.</p>
+        </div>
+        <div class="header-actions">
+          <button class="secondary-button" type="button" data-solo="admin directivo" data-accion="exportarCSV" title="Descargar lo filtrado como CSV"><svg class="ic"><use href="#i-descargar"/></svg>CSV</button>
+          <button class="secondary-button" type="button" data-solo="admin directivo" data-accion="exportarExcel" title="Descargar lo filtrado como Excel"><svg class="ic"><use href="#i-descargar"/></svg>Excel</button>
+          <button class="secondary-button" type="button" data-solo="admin directivo" data-accion="exportarPDF" title="Informe imprimible o PDF"><svg class="ic"><use href="#i-imprimir"/></svg>Informe PDF</button>
+          <button class="primary-button" type="button" data-solo="admin" data-accion="mostrarVista" data-arg="registrar"><svg class="ic"><use href="#i-mas"/></svg>Nuevo bien</button>
+        </div>
+      </header>
+
+      <div class="products-card">
+        <div class="products-header">
+          <div>
+            <h2>Todos los bienes</h2>
+            <p class="products-count" id="resultText">0 activos</p>
+          </div>
+          <div class="filters">
+            <label class="search-box">
+              <svg class="ic"><use href="#i-buscar"/></svg>
+              <input type="search" id="searchInput" placeholder="Nombre, ID o aula…" autocomplete="off" aria-label="Buscar en el inventario">
+            </label>
+            <select id="categoryFilter" aria-label="Filtrar por categoría"><option value="all">Todas las categorías</option></select>
+            <select id="aulaFilter" aria-label="Filtrar por aula"><option value="all">Todas las aulas</option></select>
+            <select id="estadoFilter" aria-label="Filtrar por estado">
+              <option value="all">Todos los estados</option>
+              <option value="bueno">Bueno</option>
+              <option value="regular">Regular</option>
+              <option value="dañado">Dañado</option>
+              <option value="mantenimiento">En Mantenimiento</option>
+              <option value="prestado">Prestado ahora</option>
+              <option value="baja">Para baja / De baja</option>
+            </select>
+          </div>
+        </div>
+        <div class="table-wrapper">
+          <table class="tabla">
+            <thead>
+              <tr>
+                <th scope="col">Bien</th>
+                <th scope="col">Categoría</th>
+                <th scope="col">ID</th>
+                <th scope="col">Ubicación</th>
+                <th scope="col">Asignado</th>
+                <th scope="col">Costo</th>
+                <th scope="col">Estado</th>
+                <th scope="col">Acciones</th>
+              </tr>
+            </thead>
+            <tbody id="productTableBody"></tbody>
+          </table>
+          <div class="empty-state hidden" id="emptyState">
+            <h3>No hay resultados</h3>
+            <p>Prueba otro filtro o registra un bien nuevo.</p>
+          </div>
+          <div class="mas-wrap hidden" id="masWrap">
+            <button type="button" class="secondary-button" data-accion="mostrarMasFilas">Mostrar más</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== ESCANEAR QR + AUDITORÍA DE AULA ===== -->
+    <section class="vista" id="vistaEscanear">
+      <header class="top-header">
+        <div class="header-text">
+          <p class="section-label">Escaneo</p>
+          <h1>Escanear código QR</h1>
+          <p class="header-description"><b>Consultar</b>: muestra el bien escaneado. <b>Auditar aula</b>: comprueba qué muebles están, cuáles faltan y cuáles no son de esa aula.</p>
+        </div>
+        <div class="seg-toggle" role="tablist" aria-label="Modo de escaneo">
+          <button type="button" class="seg-btn on" id="modoConsulta" data-accion="cambiarModoEscaneo" data-arg="consulta">Consultar</button>
+          <button type="button" class="seg-btn" data-solo="admin directivo" id="modoAuditoria" data-accion="cambiarModoEscaneo" data-arg="auditoria">Auditar aula</button>
+        </div>
+      </header>
+
+      <div class="escaner-layout">
+        <div class="card-panel">
+          <div class="form-field hidden mb-12" id="auditAulaWrap">
+            <label for="auditAula">Aula que vas a auditar</label>
+            <select id="auditAula"></select>
+          </div>
+          <div class="escaner-caja">
+            <div class="escaner-placeholder" id="lectorPlaceholder">
+              <span class="escaner-marco" aria-hidden="true"></span>
+              <span>Presiona <b>Escanear con la cámara</b> y toma una foto del código.</span>
+            </div>
+            <div id="lectorQR"></div>
+          </div>
+          <button type="button" class="primary-button btn-escanear" data-abrir="inputQRFoto">
+            <svg class="ic"><use href="#i-camara"/></svg>Escanear con la cámara
+          </button>
+          <p class="escaner-ayuda">Se abre la cámara del teléfono: enfoca el código, toma la foto y listo.</p>
+          <div class="foto-botones">
+            <button type="button" class="secondary-button" id="btnCamara" data-accion="alternarCamara"><svg class="ic"><use href="#i-video"/></svg>Cámara en vivo</button>
+            <button type="button" class="secondary-button" data-abrir="inputQRGaleria"><svg class="ic"><use href="#i-imagen"/></svg>Desde galería</button>
+          </div>
+          <input type="file" id="inputQRFoto" class="hidden" accept="image/*" capture="environment" data-cambio="leerQRDesdeFoto">
+          <input type="file" id="inputQRGaleria" class="hidden" accept="image/*" data-cambio="leerQRDesdeFoto">
+          <div class="manual-id">
+            <input type="text" id="manualId" placeholder="…o escribe el ID (ej. 11532-1101-0001)" autocomplete="off" aria-label="ID del bien">
+            <button type="button" class="secondary-button" data-accion="buscarIdManual">Buscar</button>
+          </div>
+          <p class="escaner-estado" id="escanerEstado">Listo para escanear.</p>
+        </div>
+
+        <div class="card-panel" id="panelConsulta">
+          <h3>Resultado</h3>
+          <div id="resultadoEscaneo"><div class="hist-vacio">Escanea una etiqueta para ver el bien aquí.</div></div>
+        </div>
+
+        <div class="card-panel hidden" id="panelAuditoria">
+          <div class="audit-head">
+            <h3>Auditoría del aula</h3>
+            <span class="audit-progreso" id="auditProgreso">0 / 0</span>
+          </div>
+          <div class="audit-resumen">
+            <div class="audit-box ok"><strong id="auditPres">0</strong><span>Presentes</span></div>
+            <div class="audit-box warn"><strong id="auditAus">0</strong><span>Faltan</span></div>
+            <div class="audit-box bad"><strong id="auditAje">0</strong><span>No son de aquí</span></div>
+          </div>
+          <div class="audit-lista" id="auditLista"><div class="hist-vacio">Elige el aula y escanea cada mueble.</div></div>
+          <div class="form-actions">
+            <button type="button" class="secondary-button" data-accion="reiniciarAuditoria">Reiniciar</button>
+            <button type="button" class="primary-button" id="btnGuardarAudit" data-accion="guardarAuditoriaUI"><svg class="ic"><use href="#i-guardar"/></svg>Guardar auditoría</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== REPORTE EXPRÉS DE FALLAS ===== -->
+    <section class="vista" id="vistaReporte">
+      <header class="top-header">
+        <div class="header-text">
+          <p class="section-label">Mantenimiento</p>
+          <h1>Reportar una falla</h1>
+          <p class="header-description">Tres pasos: elige el bien, marca qué le pasa y, si puedes, agrega una foto. Al enviar, el bien pasa a “En Mantenimiento” y se avisa a los encargados.</p>
+        </div>
+      </header>
+
+      <div class="registrar-layout">
+        <div class="card-panel">
+          <h3><span class="paso-n">1</span>¿Qué bien?</h3>
+          <div class="form-grid">
+            <div class="form-field">
+              <label for="rxAula">Aula</label>
+              <select id="rxAula"></select>
+            </div>
+            <div class="form-field">
+              <label for="rxBuscar">Buscar</label>
+              <input type="search" id="rxBuscar" placeholder="Nombre o ID…" autocomplete="off">
+            </div>
+            <div class="form-field full">
+              <label for="rxActivo">Mueble o equipo</label>
+              <select id="rxActivo"></select>
+            </div>
+          </div>
+          <div class="rx-seleccion hidden" id="rxSeleccion"></div>
+        </div>
+
+        <div class="card-panel">
+          <h3><span class="paso-n">2</span>¿Qué le pasa?</h3>
+          <div class="chips" id="rxChips"><span class="chips-hint">Primero elige el bien.</span></div>
+          <input type="text" id="rxOtro" class="hidden campo-texto mt-8" placeholder="Escribe el tipo de daño…" maxlength="150">
+          <div class="form-field full mt-12">
+            <label for="rxDetalle">Detalle (opcional)</label>
+            <input type="text" id="rxDetalle" placeholder="Ej. La pata izquierda está quebrada" maxlength="200">
+          </div>
+
+          <h3 class="mt-16"><span class="paso-n">3</span>Foto (opcional)</h3>
+          <input type="file" id="rxFotoInput" class="hidden" accept="image/*" capture="environment" data-cambio="rxProcesarFoto">
+          <div class="rx-foto" id="rxFoto">
+            <button type="button" class="secondary-button" data-abrir="rxFotoInput"><svg class="ic"><use href="#i-camara"/></svg>Agregar foto del daño</button>
+          </div>
+          <p class="rx-ia" id="rxIA"></p>
+
+          <div class="form-actions">
+            <button type="button" class="secondary-button" data-accion="rxLimpiar">Limpiar</button>
+            <button type="button" class="primary-button btn-peligro" id="rxEnviar" data-accion="rxEnviar"><svg class="ic"><use href="#i-alerta"/></svg>Enviar reporte</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== PRÉSTAMOS ===== -->
+    <section class="vista" id="vistaPrestamos">
+      <header class="top-header">
+        <div class="header-text">
+          <p class="section-label">Operación diaria</p>
+          <h1>Préstamos</h1>
+          <p class="header-description">Presta mobiliario o equipo a un estudiante (con NIE), un docente o una persona responsable (con DUI). Cuando lo devuelvan, márcalo como devuelto; si se pierde o no lo devuelven, imprime el acta.</p>
+        </div>
+        <div class="header-actions">
+          <button class="secondary-button" type="button" data-accion="cargarPrestamos" data-arg="true"><svg class="ic"><use href="#i-actualizar"/></svg>Actualizar</button>
+          <button class="primary-button" type="button" data-solo="admin" data-accion="nuevoPrestamo"><svg class="ic"><use href="#i-mas"/></svg>Nuevo préstamo</button>
+        </div>
+      </header>
+
+      <div class="mapa-kpis" id="prKpis"></div>
+
+      <div class="card-panel">
+        <div class="pr-toolbar">
+          <label class="search-box">
+            <svg class="ic"><use href="#i-buscar"/></svg>
+            <input type="search" id="prBuscar" placeholder="Nombre, NIE/DUI, préstamo o bien…" autocomplete="off" aria-label="Buscar préstamos">
+          </label>
+          <div class="chips" id="prFiltros">
+            <button type="button" class="chip on" data-f="activos">Activos</button>
+            <button type="button" class="chip" data-f="vencidos">Vencidos</button>
+            <button type="button" class="chip" data-f="cerrados">Cerrados</button>
+            <button type="button" class="chip" data-f="todos">Todos</button>
+          </div>
+        </div>
+        <div class="pr-lista" id="prLista"><div class="mapa-loading">Cargando préstamos…</div></div>
+      </div>
+    </section>
+
+    <!-- ===== MAPA 2D ===== -->
+    <section class="vista" id="vistaMapa">
+      <header class="top-header">
+        <div class="header-text">
+          <p class="section-label">Distribución</p>
+          <h1>Mapa 2D de la escuela</h1>
+          <p class="header-description">Cada cuadro es un aula o espacio. El color indica su salud: verde bien, naranja regular y rojo con problemas. Toca uno para ver sus muebles.</p>
+        </div>
+        <div class="header-actions">
+          <div class="seg-toggle">
+            <button type="button" class="seg-btn on" id="mapaModoPlano" data-accion="cambiarModoMapa" data-arg="plano"><svg class="ic"><use href="#i-plano"/></svg>Plano</button>
+            <button type="button" class="seg-btn" id="mapaModoGrafica" data-accion="cambiarModoMapa" data-arg="grafica"><svg class="ic"><use href="#i-grafica"/></svg>Gráfica</button>
+          </div>
+          <button class="secondary-button" type="button" data-accion="cargarMapa" data-arg="true"><svg class="ic"><use href="#i-actualizar"/></svg>Actualizar</button>
+        </div>
+      </header>
+
+      <div id="mapaGeneral">
+        <div class="mapa-kpis" id="mapaKpis"></div>
+        <div class="mapa-toolbar">
+          <label class="search-box">
+            <svg class="ic"><use href="#i-buscar"/></svg>
+            <input type="search" id="mapaBuscar" placeholder="Buscar aula…" autocomplete="off" aria-label="Buscar aula">
+          </label>
+          <div class="chips" id="mapaFiltros">
+            <button type="button" class="chip on" data-f="todas">Todas</button>
+            <button type="button" class="chip" data-f="problemas">Con problemas</button>
+            <button type="button" class="chip" data-f="danado">Con dañados</button>
+            <button type="button" class="chip" data-f="mant">En mantenimiento</button>
+          </div>
+        </div>
+        <div class="mapa-leyenda">
+          <span class="leyenda-item"><i class="dot dot-bueno"></i> Bueno</span>
+          <span class="leyenda-item"><i class="dot dot-regular"></i> Regular</span>
+          <span class="leyenda-item"><i class="dot dot-danado"></i> Dañado</span>
+          <span class="leyenda-item"><i class="dot dot-mantenimiento"></i> Mantenimiento</span>
+          <span class="leyenda-item"><i class="dot dot-vacia"></i> Sin mobiliario</span>
+        </div>
+        <div id="mapaAulasGrid"><div class="mapa-loading">Cargando mapa…</div></div>
+      </div>
+
+      <div class="hidden" id="mapaDetalleCard">
+        <div class="aula-detalle-head">
+          <button class="secondary-button" type="button" data-accion="cerrarDetalleAula"><svg class="ic"><use href="#i-izq"/></svg>Todas las aulas</button>
+          <div class="aula-nav">
+            <button type="button" class="secondary-button" data-accion="moverAula" data-num="-1" title="Aula anterior" aria-label="Aula anterior"><svg class="ic"><use href="#i-izq"/></svg></button>
+            <button type="button" class="secondary-button" data-accion="moverAula" data-num="1" title="Aula siguiente" aria-label="Aula siguiente"><svg class="ic"><use href="#i-der"/></svg></button>
+          </div>
+        </div>
+        <div class="aula-detalle">
+          <div class="dash-card aula-resumen">
+            <p class="section-label" id="mapaDetalleEdificio">Aula</p>
+            <h2 id="mapaDetalleTitulo"></h2>
+            <p class="products-count" id="mapaDetalleCount">0 activos</p>
+            <div class="aula-donut-wrap">
+              <div class="donut-rel">
+                <svg class="chart-donut" viewBox="0 0 42 42" id="aulaDonut"><circle class="donut-ring" cx="21" cy="21" r="15.915"></circle></svg>
+                <div class="chart-donut-center"><strong id="aulaSalud">0%</strong><small>salud</small></div>
+              </div>
+              <div class="aula-filtros" id="aulaFiltros"></div>
+            </div>
+            <p class="aula-valor" id="aulaValor"></p>
+          </div>
+          <div class="dash-card">
+            <div class="aula-grid" id="aulaGrid"></div>
+            <div class="empty-state hidden" id="mapaDetalleEmpty">
+              <h3>Sin mobiliario aquí</h3>
+              <p>Registra bienes con esta ubicación o cambia el filtro.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </section>
+
+    <!-- ===== GESTIÓN: mantenimiento, bajas y donaciones, kits y avisos ===== -->
+    <section class="vista" id="vistaGestion">
+      <header class="top-header">
+        <div class="header-text">
+          <p class="section-label">Administración</p>
+          <h1>Gestión</h1>
+          <p class="header-description">Ciclo de vida de cada bien, mantenimiento preventivo, bajas y donaciones, kits de aula, avisos automáticos y cuentas de usuario.</p>
+          <p class="nota-rol" data-solo="directivo">Como directivo puedes revisar todo y autorizar bajas. Los cambios de mantenimiento y kits los hace el administrador.</p>
+        </div>
+        <div class="header-actions">
+          <button class="secondary-button" type="button" data-accion="cargarGestion" data-arg="true"><svg class="ic"><use href="#i-actualizar"/></svg>Actualizar</button>
+        </div>
+      </header>
+
+      <div class="gs-tabs" id="gsTabs" role="tablist">
+        <button type="button" class="gs-tab on" data-tab="mant" data-accion="gsTab" data-arg="mant">Mantenimiento</button>
+        <button type="button" class="gs-tab" data-tab="bajas" data-accion="gsTab" data-arg="bajas">Bajas y donaciones</button>
+        <button type="button" class="gs-tab" data-tab="kits" data-accion="gsTab" data-arg="kits">Kits de aula</button>
+        <button type="button" class="gs-tab" data-solo="admin" data-tab="avisos" data-accion="gsTab" data-arg="avisos">Avisos</button>
+        <button type="button" class="gs-tab" data-solo="admin" data-tab="usuarios" data-accion="gsTab" data-arg="usuarios">Usuarios y roles</button>
+      </div>
+
+      <div class="mapa-loading" id="gsCargando">Cargando…</div>
+
+      <!-- Mantenimiento y ciclo de vida -->
+      <div class="gs-panel" id="gsMant">
+        <div class="ciclo-linea" id="cicloLinea"></div>
+        <div class="mapa-kpis" id="gsKpis"></div>
+        <div class="card-panel">
+          <div class="gs-barra">
+            <div class="chips" id="gsMantFiltro">
+              <button type="button" class="chip on" data-f="vencidos">Vencidos</button>
+              <button type="button" class="chip" data-f="proximos">Próximos 30 días</button>
+              <button type="button" class="chip" data-f="proponer">Proponer baja</button>
+            </div>
+            <select id="gsMantAula" data-cambio="renderMantLista" aria-label="Filtrar por aula"><option value="all">Todas las aulas</option></select>
+          </div>
+          <div class="gs-lista" id="gsMantLista"></div>
+          <div class="gs-acciones">
+            <label class="gs-todos" data-solo="admin"><input type="checkbox" id="gsMantTodos" data-cambio="marcarTodosDesde" data-lista="gsMantLista"> Todos</label>
+            <span class="gs-cuenta" data-solo="admin" id="gsMantSel">0 seleccionados</span>
+            <button type="button" class="primary-button" data-solo="admin" id="gsBtnMant" data-accion="abrirModalMant"><svg class="ic"><use href="#i-check"/></svg>Registrar mantenimiento</button>
+            <button type="button" class="secondary-button hidden" data-solo="admin" id="gsBtnProponer" data-accion="proponerBajaSeleccion">Pasar a “Para Baja”</button>
+          </div>
+          <p class="gs-nota" id="gsMantNota"></p>
+        </div>
+      </div>
+
+      <!-- Bajas y donaciones -->
+      <div class="gs-panel hidden" id="gsBajas">
+        <div class="card-panel">
+          <h3>Bienes “Para Baja”</h3>
+          <p class="gs-nota">1) Marca los bienes. 2) Elige el destino. 3) Presiona <b>Registrar destino e imprimir acta</b>.</p>
+          <div class="gs-lista" id="gsBajaLista"></div>
+          <div class="gs-destinos" id="gsDestinos">
+            <button type="button" class="gs-destino" data-d="Repuestos"><b>Repuestos</b><span>Se desarma para reparar otros</span></button>
+            <button type="button" class="gs-destino" data-d="Reparar"><b>Reparar</b><span>Vuelve a mantenimiento</span></button>
+            <button type="button" class="gs-destino" data-d="Donación"><b>Donación</b><span>Se entrega a otra institución</span></button>
+            <button type="button" class="gs-destino" data-d="Reciclaje"><b>Reciclaje</b><span>Ya no sirve, se recicla</span></button>
+          </div>
+          <div class="form-field full mt-12">
+            <label for="gsBajaDetalle">Detalle (opcional)</label>
+            <input type="text" id="gsBajaDetalle" maxlength="200" placeholder="Ej. Donado a la Escuela Rural El Pino">
+          </div>
+          <div class="gs-acciones">
+            <label class="gs-todos"><input type="checkbox" id="gsBajaTodos" data-cambio="marcarTodosDesde" data-lista="gsBajaLista"> Todos</label>
+            <span class="gs-cuenta" id="gsBajaSel">0 seleccionados</span>
+            <button type="button" class="primary-button" id="gsBtnBaja" data-accion="registrarBajaUI"><svg class="ic"><use href="#i-imprimir"/></svg>Registrar destino e imprimir acta</button>
+          </div>
+          <div class="gs-agregar" data-solo="admin">
+            <label for="gsBajaBuscar">¿Otro bien que ya no sirve?</label>
+            <input type="search" id="gsBajaBuscar" placeholder="Busca por nombre o ID para proponerlo…" autocomplete="off">
+            <div id="gsBajaResultados"></div>
+          </div>
+        </div>
+        <div class="card-panel">
+          <h3>Historial de bajas</h3>
+          <div class="gs-resumen" id="gsBajaResumen"></div>
+          <div class="table-wrapper">
+            <table class="tabla">
+              <thead><tr><th scope="col">Fecha</th><th scope="col">Bien</th><th scope="col">Destino</th><th scope="col">Detalle</th><th scope="col">Acta</th></tr></thead>
+              <tbody id="gsBajaHist"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Kits de aula -->
+      <div class="gs-panel hidden" id="gsKits">
+        <div class="gs-barra">
+          <p class="gs-nota">Un kit agrupa muebles (por ejemplo, 30 pupitres + 1 pizarrón + 1 escritorio). Si el kit cambia de aula, todo se traslada con una sola acción.</p>
+          <button type="button" class="primary-button" data-solo="admin" data-accion="abrirEditorKit"><svg class="ic"><use href="#i-mas"/></svg>Nuevo kit</button>
+        </div>
+        <div class="card-panel hidden" id="kitEditor">
+          <h3 id="kitEditorTitulo">Nuevo kit</h3>
+          <div class="form-grid">
+            <div class="form-field">
+              <label for="kitNombre">Nombre del kit</label>
+              <input type="text" id="kitNombre" maxlength="80" placeholder="Ej. Kit 4.º grado">
+            </div>
+            <div class="form-field">
+              <label for="kitAula">Aula donde está</label>
+              <select id="kitAula" data-cambio="kitCargarMuebles"></select>
+            </div>
+          </div>
+          <div class="gs-lista" id="kitMuebles"></div>
+          <div class="gs-acciones">
+            <label class="gs-todos"><input type="checkbox" id="kitTodos" data-cambio="marcarTodosDesde" data-lista="kitMuebles"> Todos</label>
+            <span class="gs-cuenta" id="kitSel">0 seleccionados</span>
+            <button type="button" class="secondary-button" data-accion="cerrarEditorKit">Cancelar</button>
+            <button type="button" class="primary-button" id="kitGuardar" data-accion="guardarKitUI"><svg class="ic"><use href="#i-guardar"/></svg>Guardar kit</button>
+          </div>
+        </div>
+        <div class="kits-grid" id="gsKitsLista"></div>
+      </div>
+
+      <!-- Avisos (solo administradores) -->
+      <div class="gs-panel hidden" id="gsAvisos">
+        <div class="card-panel">
+          <h3>Avisos cuando se reporta una falla</h3>
+          <p class="gs-nota">Cuando alguien reporta un bien dañado, SICAM avisa al instante a los encargados. Es gratis: usa el correo de la cuenta de Google dueña del sistema (hasta 100 correos al día) y, si quieres, un bot de Telegram.</p>
+          <div class="form-field full">
+            <label for="avCorreos">Correos de mantenimiento (separados por coma)</label>
+            <textarea id="avCorreos" rows="2" placeholder="mantenimiento@escuela.edu, director@escuela.edu"></textarea>
+          </div>
+          <details class="av-tg">
+            <summary>Telegram (opcional)</summary>
+            <ol>
+              <li>En Telegram, habla con <b>@BotFather</b>, escribe <code>/newbot</code> y copia el <b>token</b> que te da.</li>
+              <li>Agrega tu bot al grupo de mantenimiento y escribe cualquier mensaje en el grupo.</li>
+              <li>Abre <code>https://api.telegram.org/bot&lt;TOKEN&gt;/getUpdates</code> y copia el número de <b>"chat":{"id":…}</b> (en grupos empieza con “-”).</li>
+            </ol>
+            <div class="form-grid">
+              <div class="form-field">
+                <label for="avTgToken">Token del bot</label>
+                <input type="password" id="avTgToken" autocomplete="off" placeholder="Se guarda oculto">
+              </div>
+              <div class="form-field">
+                <label for="avTgChat">ID del chat</label>
+                <input type="text" id="avTgChat" placeholder="-1001234567890">
+              </div>
+            </div>
+            <label class="gs-todos mt-8"><input type="checkbox" id="avTgQuitar"> Quitar Telegram</label>
+          </details>
+
+          <h3 class="mt-16">Mantenimiento preventivo</h3>
+          <div class="form-grid">
+            <div class="form-field">
+              <label for="avMeses">Cada cuántos meses (mobiliario)</label>
+              <input type="number" id="avMeses" min="1" max="120" value="12">
+            </div>
+            <div class="form-field">
+              <label for="avMesesEq">Cada cuántos meses (equipos eléctricos)</label>
+              <input type="number" id="avMesesEq" min="1" max="120" value="6">
+            </div>
+          </div>
+          <label class="gs-todos mt-12"><input type="checkbox" id="avResumen"> Enviar cada lunes a las 7:00 un resumen de mantenimientos vencidos</label>
+          <div class="form-actions">
+            <button type="button" class="secondary-button" id="avProbar" data-accion="probarAvisosUI">Enviar aviso de prueba</button>
+            <button type="button" class="primary-button" id="avGuardar" data-accion="guardarAvisosUI"><svg class="ic"><use href="#i-guardar"/></svg>Guardar</button>
+          </div>
+          <p class="gs-nota" id="avEstado"></p>
+        </div>
+      </div>
+
+      <!-- Usuarios y roles (solo administradores) -->
+      <div class="gs-panel hidden" id="gsUsuarios">
+        <div class="card-panel">
+          <h3>Usuarios y roles</h3>
+          <p class="gs-nota">Cada cuenta tiene un rol. El cambio se aplica al instante, aunque la persona tenga la sesión abierta.</p>
+          <div class="roles-guia">
+            <div class="rol-card"><span class="rol-chip rol-chip-usuario">Usuario</span><p>Docentes y estudiantes colaboradores: consultan el inventario y el mapa, escanean QR y reportan fallas.</p></div>
+            <div class="rol-card"><span class="rol-chip rol-chip-directivo">Directivo</span><p>Dirección y Subdirección: todo lo anterior, más préstamos, gestión, auditorías, bajas e informes.</p></div>
+            <div class="rol-card"><span class="rol-chip rol-chip-admin">Administrador</span><p>Encargado del inventario: puede registrar, editar, eliminar y configurar todo.</p></div>
+          </div>
+          <div class="table-wrapper mt-16">
+            <table class="tabla">
+              <thead><tr><th scope="col">Nombre</th><th scope="col">Cuenta</th><th scope="col">Entra con</th><th scope="col">Rol</th></tr></thead>
+              <tbody id="gsUsuariosLista"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Modal: registrar mantenimiento -->
+      <div class="modal-overlay hidden" id="modalMant" data-fondo="cerrarModalMant">
+        <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="mantTitulo">
+          <h3 id="mantTitulo">Registrar mantenimiento preventivo</h3>
+          <p class="modal-sub" id="mantCuantos"></p>
+          <div class="form-field">
+            <label for="mantEstado">Estado después del mantenimiento</label>
+            <select id="mantEstado">
+              <option value="">Sin cambio</option>
+              <option value="Excelente">Excelente</option>
+              <option value="Bueno">Bueno</option>
+              <option value="Regular">Regular</option>
+            </select>
+          </div>
+          <div class="form-field mt-12">
+            <label for="mantDetalle">¿Qué se hizo? (opcional)</label>
+            <input type="text" id="mantDetalle" maxlength="200" placeholder="Ej. Se ajustaron tornillos y se lijó la superficie">
+          </div>
+          <div class="form-actions">
+            <button type="button" class="secondary-button" data-accion="cerrarModalMant">Cancelar</button>
+            <button type="button" class="primary-button" id="mantConfirmar" data-accion="confirmarMant">Confirmar</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Modal: trasladar kit -->
+      <div class="modal-overlay hidden" id="modalKit" data-fondo="cerrarModalKit">
+        <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="kitTitulo">
+          <h3 id="kitTitulo">Trasladar kit</h3>
+          <p class="modal-sub" id="kitMoverInfo"></p>
+          <div class="form-field">
+            <label for="kitDestino">Nueva aula</label>
+            <select id="kitDestino"></select>
+          </div>
+          <div class="form-actions">
+            <button type="button" class="secondary-button" data-accion="cerrarModalKit">Cancelar</button>
+            <button type="button" class="primary-button" id="kitMoverOk" data-accion="confirmarMoverKit">Trasladar todo</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== REGISTRAR UN BIEN ===== -->
+    <section class="vista" id="vistaRegistrar">
+      <header class="top-header">
+        <div class="header-text">
+          <p class="section-label">Nuevo registro</p>
+          <h1>Registrar un bien</h1>
+          <p class="header-description">1) Toma una foto. 2) Revisa los datos (la IA los sugiere si reconoce el mueble). 3) Presiona <b>Registrar en inventario</b>.</p>
+        </div>
+      </header>
+
+      <div class="registrar-layout">
+        <div class="card-panel">
+          <h3><span class="paso-n">1</span>Fotos del bien</h3>
+          <div id="estadoIA">Inicializando sistema…</div>
+          <input type="file" id="inputFoto" class="hidden" accept="image/*" capture="environment" data-cambio="procesarFotos">
+          <input type="file" id="inputGaleria" class="hidden" accept="image/*" multiple data-cambio="procesarFotos">
+          <div class="foto-botones">
+            <button id="btnAbrirCamara" class="primary-button" type="button" data-abrir="inputFoto" disabled>
+              <svg class="ic"><use href="#i-camara"/></svg>Tomar foto
+            </button>
+            <button id="btnGaleria" class="secondary-button" type="button" data-abrir="inputGaleria" disabled>
+              <svg class="ic"><use href="#i-imagen"/></svg>Galería
+            </button>
+          </div>
+          <div class="fotos-grid" id="fotosGrid"><div class="fotos-vacio">Aún no hay fotos</div></div>
+          <p class="fotos-contador" id="fotosContador">0 de 5 fotos · la primera es la principal</p>
+        </div>
+
+        <div class="card-panel">
+          <h3><span class="paso-n">2</span>Datos del bien</h3>
+          <div id="formulario" class="hidden">
+            <div class="form-grid">
+              <div class="form-field">
+                <label for="categoria">Categoría <abbr title="obligatorio">*</abbr></label>
+                <select id="categoria" required><option value="">— Todas / seleccionar —</option></select>
+              </div>
+              <div class="form-field">
+                <label for="buscarBien">Buscar bien</label>
+                <input type="text" id="buscarBien" placeholder="Escribe para filtrar…" autocomplete="off">
+              </div>
+              <div class="form-field full">
+                <label for="nombre">Nombre del bien (lista del manual) <abbr title="obligatorio">*</abbr></label>
+                <select id="nombre" required><option value="">— Seleccionar bien —</option></select>
+                <input type="hidden" id="codigoBien" value="">
+              </div>
+              <div class="form-field full">
+                <label for="marca">Marca o modelo (opcional)</label>
+                <input type="text" id="marca" placeholder="Ej. MINED / Genérica" maxlength="80">
+              </div>
+              <div class="form-field">
+                <label for="ubicacion">Ubicación (aula) <abbr title="obligatorio">*</abbr></label>
+                <select id="ubicacion" required></select>
+              </div>
+              <div class="form-field">
+                <label for="asignado">Persona asignada</label>
+                <select id="asignado"></select>
+              </div>
+              <div class="form-field">
+                <label for="costo">Costo estimado ($)</label>
+                <input type="number" id="costo" placeholder="0.00" step="0.01" min="0" max="100000">
+              </div>
+              <div class="form-field">
+                <label for="estado">Estado físico</label>
+                <select id="estado"></select>
+              </div>
+              <div class="form-field full">
+                <label>Observaciones (opcional)</label>
+                <div class="chips" id="obsChips"><span class="chips-hint">Elige el bien para ver las observaciones más comunes.</span></div>
+                <input type="text" id="obsOtro" class="hidden campo-texto mt-8" placeholder="Escribe la observación…" maxlength="200">
+              </div>
+            </div>
+            <div class="form-actions">
+              <button type="button" class="secondary-button" data-accion="limpiarFormulario">Limpiar</button>
+              <button type="button" class="primary-button" id="btnGuardar" data-accion="guardarDatos"><svg class="ic"><use href="#i-guardar"/></svg>Registrar en inventario</button>
+            </div>
+          </div>
+          <div id="formHint" class="form-hint">Toma o elige una foto para habilitar el formulario.</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== ETIQUETAS QR ===== -->
+    <section class="vista" id="vistaQR">
+      <header class="top-header">
+        <div class="header-text">
+          <p class="section-label">Etiquetas</p>
+          <h1>Etiquetas QR</h1>
+          <p class="header-description">Cada código abre la ficha del bien. Filtra, presiona <b>Imprimir</b> y pega cada etiqueta en su mueble.</p>
+        </div>
+        <div class="header-actions">
+          <button class="secondary-button" type="button" data-accion="cargarQR" data-arg="true"><svg class="ic"><use href="#i-actualizar"/></svg>Recargar</button>
+          <button class="primary-button" type="button" data-accion="imprimirQR"><svg class="ic"><use href="#i-imprimir"/></svg>Imprimir</button>
+        </div>
+      </header>
+
+      <div class="products-card">
+        <div class="products-header">
+          <div>
+            <h2>Vista previa</h2>
+            <p class="products-count" id="qrCount">0 etiquetas</p>
+          </div>
+          <div class="filters">
+            <label class="search-box">
+              <svg class="ic"><use href="#i-buscar"/></svg>
+              <input type="search" id="qrFiltro" placeholder="Nombre, ID o aula…" autocomplete="off" aria-label="Buscar etiquetas">
+            </label>
+            <select id="qrAula" aria-label="Filtrar etiquetas por aula"><option value="all">Todas las aulas</option></select>
+          </div>
+        </div>
+        <div class="qr-grid" id="qrGrid"></div>
+        <div class="empty-state hidden" id="qrEmpty">
+          <h3>No hay etiquetas</h3>
+          <p>Registra bienes o prueba con otro filtro. Se imprimen las que ves en pantalla.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== GUÍA DE USO ===== -->
+    <section class="vista" id="vistaAyuda">
+      <header class="top-header">
+        <div class="header-text">
+          <p class="section-label">Ayuda</p>
+          <h1>Guía de uso</h1>
+          <p class="header-description">Pasos cortos para cada tarea. Toca una sección para abrirla.</p>
+        </div>
+      </header>
+      <div class="ayuda-grid">
+        <details class="ayuda" open>
+          <summary><svg class="ic"><use href="#i-persona"/></svg>¿Qué puedo hacer con mi rol?</summary>
+          <ul>
+            <li><b>Usuario</b> (docentes y estudiantes colaboradores): consultar el inventario y el mapa, escanear códigos QR y reportar fallas.</li>
+            <li><b>Directivo</b> (Dirección y Subdirección): todo lo anterior, más ver préstamos y gestión, auditar aulas, autorizar bajas, exportar e imprimir el <b>Informe para Dirección</b>.</li>
+            <li><b>Administrador</b> (encargado del inventario): todo, incluido registrar, editar y eliminar bienes, préstamos, mantenimiento, kits, avisos y roles.</li>
+            <li>Tu rol aparece debajo de tu nombre, en el menú. Si necesitas otro, pídeselo al administrador.</li>
+          </ul>
+        </details>
+        <details class="ayuda">
+          <summary><svg class="ic"><use href="#i-mas"/></svg>Registrar un bien nuevo</summary>
+          <ol>
+            <li>Abre <b>Registrar bien</b> en el menú.</li>
+            <li>Presiona <b>Tomar foto</b> (o <b>Galería</b>). Puedes agregar hasta 5 fotos; la primera es la principal.</li>
+            <li>Elige la <b>categoría</b>, el <b>nombre del bien</b> y la <b>ubicación</b>. Estos tres datos son obligatorios.</li>
+            <li>Presiona <b>Registrar en inventario</b>. El sistema le asigna un ID único (ej. 11532-1101-0001).</li>
+            <li>Ve a <b>Etiquetas QR</b>, imprime su etiqueta y pégala en el mueble.</li>
+          </ol>
+        </details>
+        <details class="ayuda">
+          <summary><svg class="ic"><use href="#i-escanear"/></svg>Consultar un bien con el QR</summary>
+          <ol>
+            <li>Abre <b>Escanear QR</b> y deja el modo <b>Consultar</b>.</li>
+            <li>Presiona <b>Escanear con la cámara</b>, enfoca el código y toma la foto.</li>
+            <li>Verás el bien con sus botones: <b>Ver ficha</b>, <b>Reportar falla</b>, <b>Reparado</b> y <b>Editar</b>.</li>
+            <li>Si la cámara no funciona, escribe el ID en el campo de abajo y presiona <b>Buscar</b>.</li>
+          </ol>
+        </details>
+        <details class="ayuda">
+          <summary><svg class="ic"><use href="#i-check"/></svg>Auditar un aula</summary>
+          <ol>
+            <li>En <b>Escanear QR</b>, cambia al modo <b>Auditar aula</b> y elige el aula.</li>
+            <li>Escanea cada mueble que encuentres en el aula.</li>
+            <li>La lista muestra en verde los presentes, en naranja los que faltan y en rojo los que no pertenecen a esa aula.</li>
+            <li>Presiona <b>Guardar auditoría</b>: el resultado queda en la hoja <i>Auditorias</i>.</li>
+          </ol>
+        </details>
+        <details class="ayuda">
+          <summary><svg class="ic"><use href="#i-alerta"/></svg>Reportar una falla</summary>
+          <ol>
+            <li>Abre <b>Reportar falla</b> (o escanea el QR y presiona <b>Reportar falla</b>).</li>
+            <li>Elige el aula y el bien.</li>
+            <li>Marca qué le pasa. Si no aparece, toca <b>Otro</b> y escríbelo.</li>
+            <li>Opcional: agrega una foto. La IA compara la foto con la del registro y te avisa si parece otro mueble.</li>
+            <li>Presiona <b>Enviar reporte</b>. El bien pasa a “En Mantenimiento” y se avisa a los encargados.</li>
+          </ol>
+        </details>
+        <details class="ayuda">
+          <summary><svg class="ic"><use href="#i-prestamo"/></svg>Prestar un bien</summary>
+          <ol>
+            <li>Abre <b>Préstamos</b> y presiona <b>Nuevo préstamo</b>.</li>
+            <li>Elige quién lo recibe: <b>Estudiante</b> (pide NIE y grado), <b>Docente</b> o <b>Responsable</b> (piden DUI con el formato 00000000-0).</li>
+            <li>Escribe el nombre completo. El teléfono es opcional.</li>
+            <li>Agrega los bienes (búscalos por nombre o ID, o escanea su QR) y elige la fecha de devolución.</li>
+            <li>Presiona <b>Registrar préstamo</b>. Puedes imprimir el comprobante para que la persona lo firme.</li>
+          </ol>
+        </details>
+        <details class="ayuda">
+          <summary><svg class="ic"><use href="#i-check"/></svg>Registrar una devolución o una pérdida</summary>
+          <ol>
+            <li>En <b>Préstamos</b>, busca el préstamo (los vencidos aparecen en rojo).</li>
+            <li>Si lo devolvieron, presiona <b>Devolver</b> e indica en qué estado llegó. Si llegó dañado, el bien pasa a “Dañado”.</li>
+            <li>Si no lo devolvieron o se perdió, presiona <b>Pérdida / no devuelto</b>, elige la opción y describe lo que pasó.</li>
+            <li>Se imprime el <b>acta de pérdida o no devolución</b> para que la firmen la persona, el responsable y la Dirección.</li>
+            <li>Si se perdió, el bien pasa a “Para Baja”; la Dirección decide su baja en <b>Gestión › Bajas y donaciones</b>.</li>
+          </ol>
+        </details>
+        <details class="ayuda">
+          <summary><svg class="ic"><use href="#i-editar"/></svg>Editar o eliminar un bien</summary>
+          <ol>
+            <li>En <b>Inventario</b>, presiona <b>Editar</b> en la fila del bien (también desde el mapa o el escáner).</li>
+            <li>Cambia los datos y presiona <b>Guardar cambios</b>. El cambio queda en el historial del bien.</li>
+            <li>Editar y eliminar es solo para el administrador. Al eliminar debe escribir el motivo; una copia queda en la hoja <i>Eliminados</i>.</li>
+          </ol>
+        </details>
+        <details class="ayuda">
+          <summary><svg class="ic"><use href="#i-gestion"/></svg>Mantenimiento, bajas y kits</summary>
+          <ol>
+            <li><b>Mantenimiento</b>: lista los bienes con el mantenimiento vencido o por vencer. Márcalos y presiona <b>Registrar mantenimiento</b>.</li>
+            <li><b>Bajas y donaciones</b>: decide el destino de los bienes “Para Baja” (repuestos, reparar, donación o reciclaje) e imprime el acta.</li>
+            <li><b>Kits de aula</b>: agrupa los muebles de un aula y trasládalos todos juntos a otra.</li>
+            <li><b>Avisos</b> (solo administradores): correos o Telegram que llegan cuando se reporta una falla.</li>
+            <li><b>Usuarios y roles</b> (solo administradores): cambia el rol de cada cuenta con la lista desplegable.</li>
+            <li>Los directivos ven todo y autorizan las bajas; el resto de cambios los hace el administrador.</li>
+          </ol>
+        </details>
+        <details class="ayuda">
+          <summary><svg class="ic"><use href="#i-ayuda"/></svg>¿Qué significa cada estado?</summary>
+          <ul class="ayuda-estados">
+            <li><span class="status status-bueno">Excelente / Bueno</span> Funciona bien.</li>
+            <li><span class="status status-regular">Regular</span> Funciona, pero tiene desgaste.</li>
+            <li><span class="status status-danado">Dañado</span> No se puede usar hasta repararlo.</li>
+            <li><span class="status status-mantenimiento">En Mantenimiento</span> Se reportó una falla y está en reparación.</li>
+            <li><span class="status status-baja">Para Baja</span> Ya no conviene repararlo; espera decisión de la Dirección.</li>
+            <li><span class="status status-baja">De Baja (…)</span> Salió del inventario (donado, reciclado o usado como repuesto).</li>
+            <li><span class="status status-prestado">Prestado</span> Está fuera del aula con un préstamo activo.</li>
+          </ul>
+        </details>
+        <details class="ayuda">
+          <summary><svg class="ic"><use href="#i-buscar"/></svg>Atajos</summary>
+          <ul>
+            <li><kbd>Ctrl</kbd> + <kbd>K</kbd> (o el buscador de arriba): busca cualquier bien, aula, préstamo o acción.</li>
+            <li>El botón de la luna cambia entre modo claro y oscuro.</li>
+            <li>En el teléfono, la barra de abajo da acceso rápido a Inicio, Inventario, Escanear y Préstamos (o Mapa, si eres usuario).</li>
+          </ul>
+        </details>
+      </div>
+    </section>
+
+    <footer class="footer">
+      <span>SICAM · Centro Escolar General Francisco Morazán · Código 11532</span>
+      <span>Proyecto 2.º TDS “A” · EXPO 2026 CEFRAM</span>
+    </footer>
+  </main>
+
+  <!-- ===== BARRA INFERIOR (solo en teléfono) ===== -->
+  <nav class="dock" aria-label="Accesos rápidos">
+    <button type="button" class="dock-btn nav-link" data-vista="inicio" data-accion="mostrarVista" data-arg="inicio"><svg class="ic"><use href="#i-inicio"/></svg><span>Inicio</span></button>
+    <button type="button" class="dock-btn nav-link" data-vista="inventario" data-accion="mostrarVista" data-arg="inventario"><svg class="ic"><use href="#i-caja"/></svg><span>Inventario</span></button>
+    <button type="button" class="dock-btn dock-centro" data-accion="mostrarVista" data-arg="escanear" aria-label="Escanear QR"><svg class="ic"><use href="#i-escanear"/></svg></button>
+    <button type="button" class="dock-btn nav-link" data-solo="admin directivo" data-vista="prestamos" data-accion="mostrarVista" data-arg="prestamos"><svg class="ic"><use href="#i-prestamo"/></svg><span>Préstamos</span></button>
+    <button type="button" class="dock-btn nav-link" data-solo="usuario" data-vista="mapa" data-accion="mostrarVista" data-arg="mapa"><svg class="ic"><use href="#i-mapa"/></svg><span>Mapa</span></button>
+    <button type="button" class="dock-btn" data-accion="abrirMenu"><svg class="ic"><use href="#i-menu"/></svg><span>Más</span></button>
+  </nav>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <!-- Hoja imprimible (informes, actas y comprobantes). Se llena justo antes de imprimir. -->
+  <div id="informeImprimible" class="informe hidden"></div>
+
+  <!-- ===== BUSCADOR GLOBAL (Ctrl + K) ===== -->
+  <div class="paleta-velo hidden" id="paleta" data-fondo="cerrarPaleta">
+    <div class="paleta" role="dialog" aria-modal="true" aria-label="Buscador">
+      <label class="paleta-input">
+        <svg class="ic"><use href="#i-buscar"/></svg>
+        <input type="text" id="paletaInput" placeholder="Escribe un bien, un aula, una persona o una acción…" autocomplete="off">
+        <kbd>Esc</kbd>
+      </label>
+      <div class="paleta-res" id="paletaRes"></div>
+    </div>
+  </div>
+
+  <!-- ===== MODAL: MARCAR COMO REPARADO ===== -->
+  <div class="modal-overlay hidden" id="modalReparado" data-fondo="cerrarReparado">
+    <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="repTitulo">
+      <h3 id="repTitulo">Marcar como reparado</h3>
+      <p class="modal-sub" id="repActivo"></p>
+      <div class="form-field">
+        <label for="repEstado">Estado después de la reparación</label>
+        <select id="repEstado">
+          <option value="Bueno">Bueno</option>
+          <option value="Regular">Regular</option>
+        </select>
+      </div>
+      <div class="form-field mt-12">
+        <label for="repDetalle">¿Qué se hizo? (opcional)</label>
+        <input type="text" id="repDetalle" placeholder="Ej. Se cambió el tornillo de la pata" maxlength="200">
+      </div>
+      <div class="form-actions">
+        <button type="button" class="secondary-button" data-accion="cerrarReparado">Cancelar</button>
+        <button type="button" class="primary-button btn-ok" id="btnConfirmarRep" data-accion="confirmarReparado">Confirmar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== MODAL: EDITAR / ELIMINAR UN BIEN (CRUD) ===== -->
+  <div class="modal-overlay hidden" id="modalActivo" data-fondo="cerrarEditarActivo">
+    <form class="modal-box modal-ancho" id="formActivo" role="dialog" aria-modal="true" aria-labelledby="eaTitulo" novalidate data-enviar="guardarEdicionActivo">
+      <h3 id="eaTitulo">Editar bien</h3>
+      <p class="modal-sub" id="eaId"></p>
+      <div class="form-grid">
+        <div class="form-field full">
+          <label for="eaNombre">Nombre <abbr title="obligatorio">*</abbr></label>
+          <input type="text" id="eaNombre" required minlength="3" maxlength="120">
+          <small class="campo-error" id="eaNombreErr"></small>
+        </div>
+        <div class="form-field">
+          <label for="eaCategoria">Categoría</label>
+          <input type="text" id="eaCategoria" maxlength="120" list="eaCategorias">
+          <datalist id="eaCategorias"></datalist>
+        </div>
+        <div class="form-field">
+          <label for="eaMarca">Marca o modelo</label>
+          <input type="text" id="eaMarca" maxlength="80">
+        </div>
+        <div class="form-field">
+          <label for="eaUbicacion">Ubicación <abbr title="obligatorio">*</abbr></label>
+          <select id="eaUbicacion" required></select>
+          <small class="campo-error" id="eaUbicacionErr"></small>
+        </div>
+        <div class="form-field">
+          <label for="eaAsignado">Persona asignada</label>
+          <input type="text" id="eaAsignado" maxlength="120">
+        </div>
+        <div class="form-field">
+          <label for="eaCosto">Costo ($)</label>
+          <input type="number" id="eaCosto" min="0" max="100000" step="0.01">
+          <small class="campo-error" id="eaCostoErr"></small>
+        </div>
+        <div class="form-field">
+          <label for="eaEstado">Estado</label>
+          <select id="eaEstado"></select>
+        </div>
+        <div class="form-field full">
+          <label for="eaObs">Observaciones</label>
+          <textarea id="eaObs" rows="3" maxlength="1000"></textarea>
+        </div>
+      </div>
+      <div class="form-actions">
+        <button type="button" class="secondary-button" data-accion="cerrarEditarActivo">Cancelar</button>
+        <button type="submit" class="primary-button" id="eaGuardar"><svg class="ic"><use href="#i-guardar"/></svg>Guardar cambios</button>
+      </div>
+      <details class="zona-peligro hidden" id="eaPeligro">
+        <summary>Eliminar este bien (solo administradores)</summary>
+        <p>Se quita del inventario. Una copia completa queda en la hoja <i>Eliminados</i> por si hay que recuperarlo.</p>
+        <div class="form-field">
+          <label for="eaMotivo">Motivo de la eliminación <abbr title="obligatorio">*</abbr></label>
+          <input type="text" id="eaMotivo" maxlength="300" placeholder="Ej. Registro duplicado por error">
+        </div>
+        <button type="button" class="primary-button btn-peligro" id="eaEliminar" data-accion="eliminarActivoUI"><svg class="ic"><use href="#i-borrar"/></svg>Eliminar definitivamente</button>
+      </details>
+    </form>
+  </div>
+
+  <!-- ===== MODAL: NUEVO / EDITAR PRÉSTAMO ===== -->
+  <div class="modal-overlay hidden" id="modalPrestamo">
+    <form class="modal-box modal-ancho" id="formPrestamo" role="dialog" aria-modal="true" aria-labelledby="prTitulo" novalidate data-enviar="guardarPrestamo">
+      <div class="modal-top">
+        <h3 id="prTitulo">Nuevo préstamo</h3>
+        <button type="button" class="icon-btn" data-accion="cerrarModalPrestamo" aria-label="Cerrar"><svg class="ic"><use href="#i-cerrar"/></svg></button>
+      </div>
+
+      <fieldset class="pr-paso">
+        <legend><span class="paso-n">1</span>¿Quién lo recibe?</legend>
+        <div class="seg-toggle seg-full" id="prTipo" role="radiogroup" aria-label="Tipo de persona">
+          <button type="button" class="seg-btn on" data-tipo="Estudiante" role="radio" aria-checked="true">Estudiante</button>
+          <button type="button" class="seg-btn" data-tipo="Docente" role="radio" aria-checked="false">Docente</button>
+          <button type="button" class="seg-btn" data-tipo="Responsable" role="radio" aria-checked="false">Responsable</button>
+        </div>
+        <div class="form-grid mt-12">
+          <div class="form-field">
+            <label for="prDoc" id="prDocLbl">NIE del estudiante <abbr title="obligatorio">*</abbr></label>
+            <input type="text" id="prDoc" inputmode="numeric" autocomplete="off" maxlength="10" placeholder="Ej. 1234567">
+            <small class="campo-ayuda" id="prDocAyuda">Solo números, de 5 a 10 dígitos.</small>
+            <small class="campo-error" id="prDocErr"></small>
+          </div>
+          <div class="form-field">
+            <label for="prNombre">Nombre completo <abbr title="obligatorio">*</abbr></label>
+            <input type="text" id="prNombre" autocomplete="off" maxlength="100" placeholder="Nombres y apellidos">
+            <small class="campo-error" id="prNombreErr"></small>
+          </div>
+          <div class="form-field" id="prGradoWrap">
+            <label for="prGrado">Grado <abbr title="obligatorio">*</abbr></label>
+            <select id="prGrado">
+              <option value="">— Elegir —</option>
+              <option>Parvularia 4</option><option>Parvularia 5</option><option>Parvularia 6</option>
+              <option>1.º grado</option><option>2.º grado</option><option>3.º grado</option>
+              <option>4.º grado</option><option>5.º grado</option><option>6.º grado</option>
+              <option>7.º grado</option><option>8.º grado</option><option>9.º grado</option>
+              <option>1.º bachillerato</option><option>2.º bachillerato</option><option>3.º bachillerato</option>
+            </select>
+            <small class="campo-error" id="prGradoErr"></small>
+          </div>
+          <div class="form-field" id="prSeccionWrap">
+            <label for="prSeccion">Sección</label>
+            <input type="text" id="prSeccion" maxlength="1" placeholder="A" autocomplete="off">
+            <small class="campo-error" id="prSeccionErr"></small>
+          </div>
+          <div class="form-field">
+            <label for="prTel">Teléfono (opcional)</label>
+            <input type="tel" id="prTel" inputmode="numeric" maxlength="9" placeholder="7000-0000" autocomplete="off">
+            <small class="campo-error" id="prTelErr"></small>
+          </div>
+        </div>
+      </fieldset>
+
+      <fieldset class="pr-paso" id="prPasoBienes">
+        <legend><span class="paso-n">2</span>¿Qué se presta?</legend>
+        <div class="pr-agregar">
+          <label class="search-box">
+            <svg class="ic"><use href="#i-buscar"/></svg>
+            <input type="search" id="prBuscarBien" placeholder="Busca por nombre, ID o aula…" autocomplete="off" aria-label="Buscar bien para prestar">
+          </label>
+          <button type="button" class="secondary-button" data-abrir="prQRInput"><svg class="ic"><use href="#i-camara"/></svg>Escanear QR</button>
+          <input type="file" id="prQRInput" class="hidden" accept="image/*" capture="environment" data-cambio="prEscanearQR">
+        </div>
+        <div class="pr-resultados" id="prResultados"></div>
+        <div class="pr-seleccion" id="prSeleccion"><span class="chips-hint">Todavía no agregas bienes.</span></div>
+        <small class="campo-error" id="prBienesErr"></small>
+      </fieldset>
+
+      <fieldset class="pr-paso">
+        <legend><span class="paso-n">3</span>¿Hasta cuándo?</legend>
+        <div class="form-grid">
+          <div class="form-field">
+            <label for="prFecha">Fecha de devolución <abbr title="obligatorio">*</abbr></label>
+            <input type="date" id="prFecha">
+            <small class="campo-error" id="prFechaErr"></small>
+          </div>
+          <div class="form-field">
+            <span class="lbl-falso">Atajos</span>
+            <div class="chips" id="prPlazos">
+              <button type="button" class="chip" data-dias="0">Hoy</button>
+              <button type="button" class="chip" data-dias="7">1 semana</button>
+              <button type="button" class="chip" data-dias="30">1 mes</button>
+            </div>
+          </div>
+          <div class="form-field full">
+            <label for="prObs">Observaciones (opcional)</label>
+            <input type="text" id="prObs" maxlength="500" placeholder="Ej. Para la feria de ciencias">
+          </div>
+        </div>
+      </fieldset>
+
+      <p class="form-msg" id="prMsg"></p>
+      <div class="form-actions">
+        <button type="button" class="secondary-button" data-accion="cerrarModalPrestamo">Cancelar</button>
+        <button type="submit" class="primary-button" id="prGuardar"><svg class="ic"><use href="#i-guardar"/></svg>Registrar préstamo</button>
+      </div>
+    </form>
+  </div>
+
+  <!-- ===== MODAL: CERRAR PRÉSTAMO (devolución, pérdida o no devuelto) ===== -->
+  <div class="modal-overlay hidden" id="modalCerrarPr" data-fondo="cerrarModalCerrarPr">
+    <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="cpTitulo">
+      <h3 id="cpTitulo">Cerrar préstamo</h3>
+      <p class="modal-sub" id="cpInfo"></p>
+      <div class="seg-toggle seg-full" id="cpResultado" role="radiogroup" aria-label="Resultado">
+        <button type="button" class="seg-btn on" data-r="Devuelto" role="radio" aria-checked="true">Devuelto</button>
+        <button type="button" class="seg-btn" data-r="No devuelto" role="radio" aria-checked="false">No devuelto</button>
+        <button type="button" class="seg-btn" data-r="Perdido" role="radio" aria-checked="false">Perdido</button>
+      </div>
+      <div class="form-field mt-12" id="cpCondicionWrap">
+        <label for="cpCondicion">¿En qué estado se devolvió? <abbr title="obligatorio">*</abbr></label>
+        <select id="cpCondicion">
+          <option value="Bueno">Bueno (igual que como se prestó)</option>
+          <option value="Regular">Regular (con desgaste)</option>
+          <option value="Dañado">Dañado (no se puede usar)</option>
+        </select>
+      </div>
+      <div class="form-field mt-12">
+        <label for="cpObs" id="cpObsLbl">Observaciones (opcional)</label>
+        <textarea id="cpObs" rows="2" maxlength="500"></textarea>
+        <small class="campo-ayuda" id="cpAyuda"></small>
+      </div>
+      <p class="form-msg" id="cpMsg"></p>
+      <div class="form-actions">
+        <button type="button" class="secondary-button" data-accion="cerrarModalCerrarPr">Cancelar</button>
+        <button type="button" class="primary-button" id="cpConfirmar" data-accion="confirmarCerrarPr">Confirmar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== INICIO DE SESIÓN / REGISTRO (estilo Google) ===== -->
+  <div class="g-overlay" id="loginOverlay">
+    <div class="g-card">
+      <div class="g-progreso" id="gProgreso"></div>
+      <div class="g-marca">
+        <div class="logo"><svg class="logo-marca" aria-hidden="true"><use href="#logo-marca"/></svg><span class="logo-txt">SICAM</span></div>
+        <span class="g-marca-txt">Control de mobiliario · CEFRAM</span>
+      </div>
+
+      <!-- Paso 1: correo -->
+      <section class="g-paso" id="pasoCorreo">
+        <div class="g-izq">
+          <h1>Iniciar sesión</h1>
+          <p class="g-sub">Usa tu cuenta de SICAM o de Google</p>
+        </div>
+        <div class="g-der">
+          <div class="g-campo">
+            <input type="text" id="loginUser" placeholder=" " autocomplete="username" autocapitalize="off" spellcheck="false">
+            <label for="loginUser">Correo o usuario</label>
+          </div>
+          <p class="g-error" id="errUser"></p>
+          <button type="button" class="g-link" data-accion="olvideContrasena">¿Olvidaste tu contraseña?</button>
+          <div class="g-o"><span>o</span></div>
+          <button type="button" class="btn-google g-google" data-accion="iniciarConGoogle">
+            <svg width="18" height="18" viewBox="0 0 48 48" aria-hidden="true">
+              <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
+              <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>
+              <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/>
+              <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>
+            </svg>
+            Continuar con Google
+          </button>
+          <div class="g-acciones">
+            <button type="button" class="g-texto" data-accion="irAPaso" data-arg="registro">Crear cuenta</button>
+            <button type="button" class="g-boton" id="btnSiguienteCorreo" data-accion="pasoCorreoSiguiente">Siguiente</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Paso 2: contraseña -->
+      <section class="g-paso hidden" id="pasoClave">
+        <div class="g-izq">
+          <h1 id="claveTitulo">Te damos la bienvenida</h1>
+          <button type="button" class="g-chip" data-accion="irAPaso" data-arg="correo" title="Cambiar de cuenta">
+            <span class="g-chip-av" id="chipAvatar">U</span><span id="chipCorreo"></span><span>▾</span>
+          </button>
+        </div>
+        <div class="g-der">
+          <div class="g-campo">
+            <input type="password" id="loginPass" placeholder=" " autocomplete="current-password">
+            <label for="loginPass">Ingresa tu contraseña</label>
+          </div>
+          <p class="g-error" id="errPass"></p>
+          <label class="g-check"><input type="checkbox" data-cambio="mostrarClaves"> Mostrar contraseña</label>
+          <div class="g-acciones">
+            <button type="button" class="g-texto" data-accion="olvideContrasena">¿Olvidaste la contraseña?</button>
+            <button type="button" class="g-boton" id="btnLogin" data-accion="iniciarSesion">Siguiente</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Registro -->
+      <section class="g-paso hidden" id="pasoRegistro">
+        <div class="g-izq">
+          <h1>Crear una cuenta de SICAM</h1>
+          <p class="g-sub">Ingresa tus datos. También puedes registrarte con Google.</p>
+        </div>
+        <div class="g-der">
+          <div class="g-campo">
+            <input type="text" id="regNombre" placeholder=" " autocomplete="name">
+            <label for="regNombre">Nombre completo</label>
+          </div>
+          <div class="g-campo">
+            <input type="text" id="regUser" placeholder=" " autocomplete="username" autocapitalize="off" spellcheck="false">
+            <label for="regUser">Correo electrónico o usuario</label>
+          </div>
+          <div class="g-fila">
+            <div class="g-campo">
+              <input type="password" id="regPass" placeholder=" " autocomplete="new-password">
+              <label for="regPass">Contraseña</label>
+            </div>
+            <div class="g-campo">
+              <input type="password" id="regPass2" placeholder=" " autocomplete="new-password">
+              <label for="regPass2">Confirmar</label>
+            </div>
+          </div>
+          <p class="g-ayuda">Usa 6 caracteres como mínimo.</p>
+          <p class="g-error" id="errReg"></p>
+          <label class="g-check"><input type="checkbox" data-cambio="mostrarClaves"> Mostrar contraseña</label>
+          <button type="button" class="btn-google g-google" data-accion="iniciarConGoogle">
+            <svg width="18" height="18" viewBox="0 0 48 48" aria-hidden="true">
+              <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
+              <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>
+              <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/>
+              <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>
+            </svg>
+            Registrarse con Google
+          </button>
+          <div class="g-acciones">
+            <button type="button" class="g-texto" data-accion="irAPaso" data-arg="correo">Iniciar sesión en su lugar</button>
+            <button type="button" class="g-boton" id="btnRegister" data-accion="registrarCuenta">Siguiente</button>
+          </div>
+        </div>
+      </section>
+    </div>
+    <div class="g-pie">
+      <span>Español (Latinoamérica)</span>
+      <span>Centro Escolar General Francisco Morazán</span>
+    </div>
+  </div>
+
+  <!-- Vista rápida de un bien (se abre desde el mapa, el inventario, el inicio o el buscador) -->
+  <div class="modal-overlay hidden" id="muebleModal" data-fondo="cerrarMueble">
+    <div class="modal-box" id="muebleBox" role="dialog" aria-modal="true"></div>
+  </div>
+
+  <!-- Datos que el servidor pasa a la página -->
+  <script>
+    window.VISTA_INICIAL = <?!= jsonParaPlantilla(vistaInicial) ?> || 'inicio';
+    window.URL_APP = <?!= jsonParaPlantilla(urlApp) ?> || '';
+    window.LOGIN_GOOGLE = <?!= jsonParaPlantilla(loginGoogle) ?> || '';
+  </script>
+  <!-- JavaScript por módulos (el orden importa: primero el núcleo) -->
+  <?!= include('js/App'); ?>
+  <?!= include('js/Inicio'); ?>
+  <?!= include('js/Inventario'); ?>
+  <?!= include('js/Registro'); ?>
+  <?!= include('js/Escaner'); ?>
+  <?!= include('js/Mapa'); ?>
+  <?!= include('js/Gestion'); ?>
+  <?!= include('js/Prestamos'); ?>
+</body>
+</html>

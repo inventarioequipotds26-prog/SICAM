@@ -1,0 +1,502 @@
+<script>
+/* =====================================================================
+   SICAM · js/Ficha
+   Lógica de la ficha pública de un bien (Ficha.html): datos, fotos, estado,
+   préstamo vigente, historial, QR, reportar falla y marcar como reparado.
+   Secciones:
+     1. Datos de la página y utilidades
+     2. Carga de la ficha
+     3. Galería de fotos
+     4. Dibujo de la ficha e historial
+     5. Reportar falla
+     6. Marcar como reparado
+     7. Eventos declarativos (data-accion) y teclado
+   ===================================================================== */
+
+/* ---------- 1. DATOS DE LA PÁGINA Y UTILIDADES ---------- */
+const ID_ACTIVO = String(window.ID_ACTIVO || '').replace(/[   ﻿]/g, '').trim();
+const DESDE = String(window.DESDE || '');
+let urlBaseApp = String(window.URL_APP || '').trim().replace(/^["']+|["']+$/g, '');
+
+let activoActual = null;   // bien que se está mostrando
+let fotoSrcs = [];         // direcciones de las fotos (miniatura de Drive o data URI)
+let fotoIdx = 0;           // foto que se ve en grande
+let repFotoData = '';      // foto del daño (JPEG en base64) para el reporte
+const fotoReintentada = {};
+let toastTimer = null;
+
+function escapeHTML(texto) {
+  return String(texto == null ? '' : texto)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+function icono(nombre) { return '<svg class="ic" aria-hidden="true"><use href="#i-' + nombre + '"/></svg>'; }
+
+/** Sesión iniciada en este teléfono (si la hay): nombre, rol y llave */
+function sesionGuardada() {
+  try { return JSON.parse(localStorage.getItem('sicamUser') || '{}') || {}; } catch (e) { return {}; }
+}
+function nombreGuardado() { return sesionGuardada().nombre || ''; }
+/** Solo el administrador puede marcar como reparado (el servidor también lo revisa) */
+function esAdminFicha() { return !!sesionGuardada().token && /admin/i.test(sesionGuardada().rol || ''); }
+function tokenGuardado() { return sesionGuardada().token || ''; }
+
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(function () { t.classList.remove('show'); }, 3000);
+}
+
+/** Muestra un mensaje dentro de un modal (tipo: 'error' u 'ok') */
+function ponerMensaje(id, tipo, texto) {
+  const el = document.getElementById(id);
+  el.textContent = texto || '';
+  el.className = 'form-msg' + (tipo ? ' ' + tipo : '');
+}
+
+/** Estado → color, ícono y explicación corta */
+function infoEstado(estado) {
+  const e = String(estado || '').toLowerCase();
+  if (e.indexOf('de baja') === 0) return { cls: 'baja', ico: 'borrar', sub: 'Dado de baja: ya no forma parte del inventario activo.' };
+  if (e.indexOf('baja') >= 0) return { cls: 'danado', ico: 'alerta', sub: 'Propuesto para baja: se decide si se repara, se dona o se recicla.' };
+  if (e.indexOf('excelente') >= 0) return { cls: 'bueno', ico: 'chispa', sub: 'Como nuevo.' };
+  if (e.indexOf('buen') >= 0) return { cls: 'bueno', ico: 'check', sub: 'En buenas condiciones.' };
+  if (e.indexOf('regular') >= 0) return { cls: 'regular', ico: 'reloj', sub: 'Se puede usar, pero necesita cuidado.' };
+  if (e.indexOf('dañ') >= 0 || e.indexOf('dan') >= 0 || e.indexOf('roto') >= 0) return { cls: 'danado', ico: 'alerta', sub: 'Necesita reparación.' };
+  if (e.indexOf('manten') >= 0) return { cls: 'mant', ico: 'gestion', sub: 'Está en mantenimiento.' };
+  return { cls: 'bueno', ico: 'caja', sub: '' };
+}
+function necesitaReparar(estado) {
+  const e = String(estado || '').toLowerCase();
+  if (e.indexOf('baja') >= 0) return false;
+  return e.indexOf('manten') >= 0 || e.indexOf('dañ') >= 0 || e.indexOf('dan') >= 0 || e.indexOf('roto') >= 0;
+}
+
+/** Vuelve a la aplicación principal (a la vista de donde vino, si se sabe) */
+function volver() {
+  if (!urlBaseApp) { history.back(); return; }
+  const sep = urlBaseApp.indexOf('?') >= 0 ? '&' : '?';
+  window.top.location.href = urlBaseApp + sep + 'vista=' + encodeURIComponent(DESDE || 'inicio');
+}
+
+function alternarTema() {
+  const oscuro = document.documentElement.getAttribute('data-theme') !== 'oscuro';
+  document.documentElement.setAttribute('data-theme', oscuro ? 'oscuro' : 'claro');
+  try { localStorage.setItem('sicamTema', oscuro ? 'oscuro' : 'claro'); } catch (e) {}
+}
+
+/* ---------- 2. CARGA DE LA FICHA ---------- */
+function cargarFicha() {
+  if (DESDE) document.getElementById('volverTxt').textContent = 'Volver';
+  if (!ID_ACTIVO) { renderError('Falta el código del bien en el enlace.', ''); return; }
+  google.script.run
+    .withSuccessHandler(function (a) {
+      if (a && a._error) {
+        const ejemplos = (a.ejemplos && a.ejemplos.length) ? 'Algunos códigos que sí existen: ' + a.ejemplos.join(', ') : '';
+        renderError(a.mensaje || 'No se encontró el bien.', ejemplos);
+      } else if (a && a.id) {
+        if (a.urlApp && !urlBaseApp) urlBaseApp = a.urlApp;
+        document.getElementById('btnReportarTop').classList.toggle('hidden', /^\s*de baja/i.test(a.estado || ''));
+        prepararFotos(a);
+        renderFicha(a);
+      } else {
+        renderError('No se encontró el bien.', '');
+      }
+    })
+    .withFailureHandler(function (err) {
+      renderError('No se pudo cargar la ficha. Revisa tu conexión e intenta de nuevo.', err && err.message ? err.message : '');
+    })
+    .obtenerActivoPorId(ID_ACTIVO);
+}
+
+function renderError(mensaje, detalle) {
+  document.getElementById('fichaNombre').textContent = 'Bien no encontrado';
+  document.getElementById('fichaSub').textContent = 'Código buscado: ' + (ID_ACTIVO || '—');
+  document.getElementById('fichaRoot').innerHTML =
+    '<div class="card-panel ficha-error">' + icono('alerta') +
+      '<h2>' + escapeHTML(mensaje) + '</h2>' +
+      '<p>Revisa que la etiqueta QR esté completa o escribe el código en la opción «Escanear QR» del sistema.</p>' +
+      (detalle ? '<p class="mt-12"><code>' + escapeHTML(detalle) + '</code></p>' : '') +
+    '</div>';
+}
+
+/* ---------- 3. GALERÍA DE FOTOS ----------
+   Las fotos se piden directo a Drive (rápido). Solo si Drive no la entrega,
+   se pide al servidor en base64 (más lento, por eso es el último recurso). */
+function miniaturaDrive(url) {
+  const u = String(url || '');
+  const m = u.match(/\/file\/d\/([a-zA-Z0-9_-]+)/) || u.match(/[?&]id=([a-zA-Z0-9_-]+)/);
+  return m ? 'https://drive.google.com/thumbnail?id=' + m[1] + '&sz=w1200' : '';
+}
+function prepararFotos(a) {
+  fotoIdx = 0;
+  fotoSrcs = (a.fotos || []).map(function (u) { return miniaturaDrive(u) || u; });
+}
+
+function heroHtml() {
+  const total = (activoActual.fotos || []).length;
+  if (!total) return '<div class="hero-foto sin">' + icono('imagen') + '<span>Sin fotografía registrada</span></div>';
+  const actual = fotoSrcs[fotoIdx];
+  return '<button type="button" class="hero-foto" data-accion="abrirVisor" aria-label="Ver foto en grande">' +
+    (actual ? '<img src="' + escapeHTML(actual) + '" alt="Foto de ' + escapeHTML(activoActual.nombre) + '" referrerpolicy="no-referrer" data-foto="' + fotoIdx + '">'
+            : '<span class="hero-cargando">Cargando foto…</span>') +
+    '<span class="hero-chip izq">' + escapeHTML(activoActual.estado || '—') + '</span>' +
+    (total > 1 ? '<span class="hero-chip der">' + (fotoIdx + 1) + ' / ' + total + '</span>' : '') +
+  '</button>';
+}
+function thumbsHtml() {
+  const total = (activoActual.fotos || []).length;
+  if (total <= 1) return '';
+  let html = '<div class="thumbs">';
+  for (let i = 0; i < total; i++) {
+    html += '<button type="button" class="thumb' + (i === fotoIdx ? ' activa' : '') + '" data-accion="verFoto" data-num="' + i + '" aria-label="Foto ' + (i + 1) + '">' +
+      (fotoSrcs[i] ? '<img src="' + escapeHTML(fotoSrcs[i]) + '" alt="" referrerpolicy="no-referrer" loading="lazy" data-foto="' + i + '">' : '…') +
+    '</button>';
+  }
+  return html + '</div>';
+}
+function refrescarGaleria() {
+  const wrap = document.getElementById('galeriaWrap');
+  if (wrap) wrap.innerHTML = heroHtml() + thumbsHtml();
+}
+function verFoto(i) { if (!fotoSrcs[i]) return; fotoIdx = i; refrescarGaleria(); }
+function abrirVisor() {
+  const src = fotoSrcs[fotoIdx];
+  if (!src) return;
+  document.getElementById('visorImg').src = src;
+  document.getElementById('visor').classList.remove('hidden');
+}
+function cerrarVisor() { document.getElementById('visor').classList.add('hidden'); }
+
+/** Si una foto no carga desde Drive, se pide una sola vez al servidor */
+function fotoFallo(i) {
+  if (fotoReintentada[i] || !activoActual) return;
+  fotoReintentada[i] = true;
+  const url = (activoActual.fotos || [])[i];
+  if (!url) return;
+  google.script.run
+    .withSuccessHandler(function (data) {
+      if (data && String(data).indexOf('data:image') === 0) { fotoSrcs[i] = data; refrescarGaleria(); }
+    })
+    .withFailureHandler(function () {})
+    .obtenerFotoData(url);
+}
+/* Los errores de imagen no burbujean: se escuchan en fase de captura */
+document.addEventListener('error', function (e) {
+  const img = e.target;
+  if (img && img.tagName === 'IMG' && img.hasAttribute('data-foto')) fotoFallo(Number(img.getAttribute('data-foto')));
+}, true);
+
+/* ---------- 4. DIBUJO DE LA FICHA E HISTORIAL ---------- */
+function dataItem(lbl, val, extra) {
+  return '<div class="data-item' + (extra && extra.full ? ' full' : '') + '">' +
+    '<span class="lbl">' + escapeHTML(lbl) + '</span>' +
+    '<span class="val' + (extra && extra.mono ? ' mono' : '') + '">' + escapeHTML(val || '—') + '</span>' +
+  '</div>';
+}
+
+function renderFicha(a) {
+  activoActual = a;
+  document.title = 'SICAM · ' + (a.nombre || 'Ficha del bien');
+  document.getElementById('fichaNombre').textContent = a.nombre || 'Sin nombre';
+  document.getElementById('fichaSub').textContent = (a.categoria || 'Sin categoría') + ' · ' + (a.ubicacion || 'Sin ubicación');
+  document.getElementById('fichaEtiqueta').textContent = 'Ficha del bien' + (DESDE ? ' · desde ' + DESDE : '');
+
+  const est = infoEstado(a.estado);
+  const obs = String(a.observaciones || '').split(' | ').map(function (p) { return p.trim(); }).filter(Boolean);
+  const deBaja = /^\s*de baja/i.test(a.estado || '');
+  const prestamo = a.prestamo && a.prestamo.prestado
+    ? '<div class="aviso-prestado">' + icono('prestamo') + '<span>Este bien está prestado' +
+        (a.prestamo.hasta ? ' hasta el ' + escapeHTML(a.prestamo.hasta) : '') + '.</span></div>'
+    : '';
+
+  const acciones =
+    (necesitaReparar(a.estado) && esAdminFicha() ? '<button class="accion-btn verde" type="button" data-accion="abrirReparado"><span class="acc-ic">' + icono('check') + '</span>Marcar reparado</button>' : '') +
+    (deBaja ? '' : '<button class="accion-btn rojo" type="button" data-accion="abrirReporte"><span class="acc-ic">' + icono('alerta') + '</span>Reportar falla</button>') +
+    '<button class="accion-btn" type="button" data-accion="copiarId"><span class="acc-ic">' + icono('copiar') + '</span>Copiar código</button>' +
+    '<button class="accion-btn" type="button" data-accion="imprimirFicha"><span class="acc-ic">' + icono('imprimir') + '</span>Imprimir ficha</button>';
+
+  document.getElementById('fichaRoot').innerHTML =
+    '<div class="ficha-layout">' +
+      '<div class="ficha-col">' +
+        '<div id="galeriaWrap">' + heroHtml() + thumbsHtml() + '</div>' +
+        '<section class="card-panel ficha-card">' +
+          '<p class="section-label">Información general</p><h2>Datos del bien</h2>' +
+          '<div class="data-grid">' +
+            dataItem('Código (ID)', a.id, { mono: true, full: true }) +
+            dataItem('Categoría', a.categoria) +
+            dataItem('Marca o modelo', a.marca) +
+            dataItem('Ubicación', a.ubicacion) +
+            dataItem('Asignado a', a.asignado || 'Sin asignar') +
+            dataItem('Costo estimado', Number(a.costo) > 0 ? '$' + Number(a.costo).toFixed(2) : '—') +
+          '</div>' +
+        '</section>' +
+        (obs.length ? '<section class="card-panel ficha-card"><p class="section-label">Observaciones</p><h2>Notas registradas</h2>' +
+          '<ul class="obs-lista">' + obs.map(function (p) { return '<li>' + escapeHTML(p) + '</li>'; }).join('') + '</ul></section>' : '') +
+      '</div>' +
+      '<div class="ficha-col">' +
+        '<section class="card-panel ficha-card">' +
+          '<p class="section-label">Estado actual</p>' +
+          '<div class="estado-hero ' + est.cls + '">' +
+            '<div class="icon-big">' + icono(est.ico) + '</div>' +
+            '<div><div class="estado-nombre">' + escapeHTML(a.estado || '—') + '</div><div class="estado-sub">' + escapeHTML(est.sub) + '</div></div>' +
+          '</div>' +
+          prestamo +
+          '<div class="acciones-rapidas">' + acciones + '</div>' +
+        '</section>' +
+        '<section class="card-panel ficha-card">' +
+          '<p class="section-label">Historial</p><h2>Reportes y reparaciones</h2>' +
+          '<div id="historialBox"><div class="hist-vacio">Cargando historial…</div></div>' +
+        '</section>' +
+        '<section class="card-panel ficha-card">' +
+          '<p class="section-label">Código QR</p>' +
+          '<div class="qr-mini mt-12">' +
+            '<div class="qr-canvas" id="qrMini"></div>' +
+            '<div class="qr-txt"><strong>Etiqueta de este bien</strong><span>Escanéalo para abrir esta ficha en cualquier teléfono.</span></div>' +
+          '</div>' +
+        '</section>' +
+      '</div>' +
+    '</div>';
+
+  dibujarQR(a.id);
+
+  // El historial normalmente ya viene con la ficha (una sola consulta al servidor)
+  if (Array.isArray(a.historial)) {
+    renderHistorial(a.historial);
+  } else {
+    google.script.run
+      .withSuccessHandler(function (hist) { a.historial = hist || []; renderHistorial(a.historial); })
+      .withFailureHandler(function () { renderHistorial([]); })
+      .obtenerHistorialActivo(a.id);
+  }
+}
+
+/** Dibuja el QR cuando la librería ya cargó (se carga con defer) */
+function dibujarQR(id, intentos) {
+  const cont = document.getElementById('qrMini');
+  if (!cont || !urlBaseApp) return;
+  if (typeof QRCode === 'undefined') {
+    if ((intentos || 0) < 20) setTimeout(function () { dibujarQR(id, (intentos || 0) + 1); }, 250);
+    else cont.textContent = '—';
+    return;
+  }
+  const sep = urlBaseApp.indexOf('?') >= 0 ? '&' : '?';
+  cont.innerHTML = '';
+  try {
+    new QRCode(cont, { text: urlBaseApp + sep + 'id=' + encodeURIComponent(id), width: 92, height: 92, correctLevel: QRCode.CorrectLevel.M });
+  } catch (e) { cont.textContent = '—'; }
+}
+
+function renderHistorial(hist) {
+  const box = document.getElementById('historialBox');
+  if (!box) return;
+  if (!hist || !hist.length) { box.innerHTML = '<div class="hist-vacio">Sin reportes ni reparaciones registradas.</div>'; return; }
+  box.innerHTML = hist.map(function (h) {
+    const esRep = String(h.tipo || '').indexOf('REPARADO') >= 0;
+    return '<div class="hist-item">' +
+      '<span class="hist-dot ' + (esRep ? 'rep' : 'falla') + '"></span>' +
+      '<div class="hist-body">' +
+        '<div class="hist-titulo">' + escapeHTML(h.tipo || 'Reporte') + '</div>' +
+        '<div class="hist-meta">' + escapeHTML(h.fecha) +
+          (h.reportadoPor ? ' · ' + escapeHTML(h.reportadoPor) : '') +
+          (h.estadoAnterior ? ' · antes: ' + escapeHTML(h.estadoAnterior) : '') + '</div>' +
+        (h.detalle ? '<div class="hist-detalle">' + escapeHTML(h.detalle) + '</div>' : '') +
+        (h.foto ? '<a class="hist-foto" href="' + escapeHTML(h.foto) + '" target="_blank" rel="noopener">' + icono('camara') + 'Ver foto del reporte</a>' : '') +
+      '</div>' +
+    '</div>';
+  }).join('');
+}
+
+function copiarId() {
+  if (!activoActual) return;
+  const id = activoActual.id;
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(id).then(function () { showToast('Código copiado: ' + id); }, function () { showToast('Código: ' + id); });
+  } else {
+    showToast('Código: ' + id);
+  }
+}
+function imprimirFicha() { window.print(); }
+
+/* ---------- 5. REPORTAR FALLA ---------- */
+function abrirReporte() {
+  if (!activoActual) return;
+  ponerMensaje('msgReporte', '', '');
+  const lista = activoActual.obsComunes || [];
+  document.getElementById('repFallaSub').textContent = activoActual.nombre + ' · ' + activoActual.id;
+  document.getElementById('repChips').innerHTML =
+    lista.map(function (o) { return '<button type="button" class="chip" data-obs="' + escapeHTML(o) + '">' + escapeHTML(o) + '</button>'; }).join('') +
+    '<button type="button" class="chip chip-otro" id="repChipOtro" data-accion="alternarOtroRep">Otro…</button>';
+  const otro = document.getElementById('repOtro');
+  otro.value = '';
+  otro.classList.add('hidden');
+  document.getElementById('repDetalle').value = '';
+  document.getElementById('repPor').value = nombreGuardado();
+  repQuitarFoto();
+  const b = document.getElementById('btnEnviarReporte');
+  b.disabled = false;
+  document.getElementById('modalReporte').classList.remove('hidden');
+}
+function cerrarReporte() { document.getElementById('modalReporte').classList.add('hidden'); }
+
+function alternarOtroRep() {
+  const inp = document.getElementById('repOtro');
+  const mostrar = inp.classList.contains('hidden');
+  inp.classList.toggle('hidden', !mostrar);
+  document.getElementById('repChipOtro').classList.toggle('on', mostrar);
+  if (mostrar) inp.focus(); else inp.value = '';
+}
+
+/** Reduce la foto del daño a 960 px como máximo antes de enviarla */
+function repElegirFoto(event) {
+  const archivo = event.target.files && event.target.files[0];
+  event.target.value = '';
+  if (!archivo) return;
+  if (!/^image\//.test(archivo.type)) { ponerMensaje('msgReporte', 'error', 'El archivo elegido no es una imagen.'); return; }
+  const url = URL.createObjectURL(archivo);
+  const img = new Image();
+  img.onload = function () {
+    const max = 960;
+    let w = img.naturalWidth, h = img.naturalHeight;
+    if (w > max || h > max) { if (w > h) { h = Math.round(h * max / w); w = max; } else { w = Math.round(w * max / h); h = max; } }
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    c.getContext('2d').drawImage(img, 0, 0, w, h);
+    repFotoData = c.toDataURL('image/jpeg', 0.7);
+    URL.revokeObjectURL(url);
+    document.getElementById('repFotoBox').innerHTML =
+      '<img src="' + repFotoData + '" alt="Foto del daño">' +
+      '<button type="button" class="secondary-button btn-sm" data-accion="repQuitarFoto">' + icono('borrar') + 'Quitar</button>';
+  };
+  img.onerror = function () { URL.revokeObjectURL(url); ponerMensaje('msgReporte', 'error', 'No se pudo leer la foto.'); };
+  img.src = url;
+}
+function repQuitarFoto() {
+  repFotoData = '';
+  document.getElementById('repFotoBox').innerHTML =
+    '<button type="button" class="secondary-button" data-abrir="repFotoInput">' + icono('camara') + 'Agregar foto</button>';
+}
+
+function enviarReporte() {
+  if (!activoActual) return;
+  const seleccion = Array.prototype.slice.call(document.querySelectorAll('#repChips .chip.on[data-obs]'))
+    .map(function (c) { return c.getAttribute('data-obs'); });
+  const inp = document.getElementById('repOtro');
+  const otroVisible = !inp.classList.contains('hidden');
+  const otro = otroVisible ? inp.value.trim() : '';
+  if (otroVisible && !otro) { ponerMensaje('msgReporte', 'error', 'Escribe el daño en «Otro» o desmárcalo.'); inp.focus(); return; }
+  if (otro) seleccion.push(otro);
+  const detalle = document.getElementById('repDetalle').value.trim();
+  if (!seleccion.length && !detalle) { ponerMensaje('msgReporte', 'error', 'Marca al menos un tipo de daño o escribe un detalle.'); return; }
+
+  const b = document.getElementById('btnEnviarReporte');
+  b.disabled = true;
+  ponerMensaje('msgReporte', '', repFotoData ? 'Subiendo la foto y enviando…' : 'Enviando…');
+  google.script.run
+    .withSuccessHandler(function (r) {
+      if (r && r.exito) {
+        ponerMensaje('msgReporte', 'ok', r.mensaje);
+        activoActual.estado = 'En Mantenimiento';
+        if (r.nota) activoActual.observaciones = activoActual.observaciones ? activoActual.observaciones + ' | ' + r.nota : r.nota;
+        activoActual.historial = null; // se vuelve a pedir para incluir este reporte
+        setTimeout(function () { cerrarReporte(); renderFicha(activoActual); showToast('Reporte enviado'); }, 900);
+      } else {
+        ponerMensaje('msgReporte', 'error', (r && r.mensaje) || 'No se pudo enviar el reporte.');
+        b.disabled = false;
+      }
+    })
+    .withFailureHandler(function () {
+      ponerMensaje('msgReporte', 'error', 'Sin conexión con el servidor. Intenta de nuevo.');
+      b.disabled = false;
+    })
+    .reportarFalla({
+      id: activoActual.id, nombre: activoActual.nombre,
+      tipoFalla: seleccion.join(', ') || 'Falla',
+      detalle: detalle,
+      reportadoPor: document.getElementById('repPor').value.trim(), token: tokenGuardado(),
+      nuevoEstado: 'En Mantenimiento',
+      foto_base64: repFotoData
+    });
+}
+
+/* ---------- 6. MARCAR COMO REPARADO ---------- */
+function abrirReparado() {
+  if (!activoActual) return;
+  ponerMensaje('msgReparado', '', '');
+  document.getElementById('repRepSub').textContent = activoActual.nombre + ' · ' + activoActual.id;
+  document.querySelectorAll('#estadoChips .seg-btn').forEach(function (c) { c.classList.toggle('on', c.getAttribute('data-est') === 'Bueno'); });
+  document.getElementById('repDetalleRep').value = '';
+  document.getElementById('btnConfirmarReparado').disabled = false;
+  document.getElementById('modalReparado').classList.remove('hidden');
+}
+function cerrarReparado() { document.getElementById('modalReparado').classList.add('hidden'); }
+
+function enviarReparado() {
+  if (!activoActual) return;
+  const sel = document.querySelector('#estadoChips .seg-btn.on');
+  const nuevo = sel ? sel.getAttribute('data-est') : 'Bueno';
+  const b = document.getElementById('btnConfirmarReparado');
+  b.disabled = true;
+  ponerMensaje('msgReparado', '', 'Guardando…');
+  google.script.run
+    .withSuccessHandler(function (r) {
+      if (r && r.exito) {
+        ponerMensaje('msgReparado', 'ok', r.mensaje);
+        activoActual.estado = r.estado || nuevo;
+        if (r.nota) activoActual.observaciones = activoActual.observaciones ? activoActual.observaciones + ' | ' + r.nota : r.nota;
+        activoActual.historial = null;
+        setTimeout(function () { cerrarReparado(); renderFicha(activoActual); showToast('Reparación registrada'); }, 900);
+      } else {
+        ponerMensaje('msgReparado', 'error', (r && r.mensaje) || 'No se pudo guardar.');
+        b.disabled = false;
+      }
+    })
+    .withFailureHandler(function () {
+      ponerMensaje('msgReparado', 'error', 'Sin conexión con el servidor. Intenta de nuevo.');
+      b.disabled = false;
+    })
+    .marcarReparado({
+      id: activoActual.id, nombre: activoActual.nombre,
+      nuevoEstado: nuevo,
+      detalle: document.getElementById('repDetalleRep').value.trim(),
+      token: tokenGuardado()
+    });
+}
+
+/* ---------- 7. EVENTOS DECLARATIVOS Y TECLADO (igual que en js/App) ---------- */
+function ejecutar(nombre, args) {
+  const fn = window[nombre];
+  if (typeof fn !== 'function') { console.warn('Acción desconocida:', nombre); return; }
+  fn.apply(null, args);
+}
+document.addEventListener('click', function (e) {
+  const fondo = e.target.closest('[data-fondo]');
+  if (fondo && e.target === fondo) { ejecutar(fondo.dataset.fondo, []); return; }
+  const abrir = e.target.closest('[data-abrir]');
+  if (abrir) { document.getElementById(abrir.dataset.abrir).click(); return; }
+  const chip = e.target.closest('#repChips .chip[data-obs]');
+  if (chip) { chip.classList.toggle('on'); return; }
+  const seg = e.target.closest('#estadoChips .seg-btn');
+  if (seg) {
+    document.querySelectorAll('#estadoChips .seg-btn').forEach(function (c) { c.classList.toggle('on', c === seg); });
+    return;
+  }
+  const el = e.target.closest('[data-accion]');
+  if (!el || el.disabled) return;
+  ejecutar(el.dataset.accion, el.hasAttribute('data-num') ? [Number(el.dataset.num)] : []);
+});
+document.addEventListener('change', function (e) {
+  const el = e.target.closest('[data-cambio]');
+  if (el) ejecutar(el.dataset.cambio, [e]);
+});
+document.addEventListener('keydown', function (e) {
+  if (e.key !== 'Escape') return;
+  cerrarVisor();
+  cerrarReporte();
+  cerrarReparado();
+});
+
+cargarFicha();
+</script>

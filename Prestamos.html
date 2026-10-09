@@ -1,0 +1,609 @@
+<script>
+/* =====================================================================
+   SICAM · js/Prestamos — préstamos a estudiantes, docentes y responsables
+     1. Lista, filtros e indicadores (READ)
+     2. Formulario nuevo / editar préstamo con validación (CREATE / UPDATE)
+     3. Cerrar préstamo: devuelto, no devuelto o perdido
+     4. Documentos imprimibles: comprobante y acta de pérdida o no devolución
+     5. Eliminar (solo administradores) y cuadro de Inicio
+   Reglas (las mismas que valida el servidor en server/Prestamos):
+     · Estudiante → NIE (5 a 10 dígitos) y grado obligatorios.
+     · Docente o Responsable → DUI con dígito verificador (00000000-0).
+     · Nombre completo: al menos nombre y apellido, solo letras.
+     · Fecha de devolución: desde hoy hasta un año.
+   ===================================================================== */
+
+let prestamos = [];
+let prestamosCargadosEn = 0;
+let prestamosPromesa = null;
+let prFiltro = 'activos';
+let prEditando = null;        // préstamo que se está editando (null = nuevo)
+let prTipo = 'Estudiante';
+let prBienesSel = [];         // bienes elegidos en el formulario
+let cpPrestamo = null;        // préstamo que se está cerrando
+let cpResultado = 'Devuelto';
+
+/* ---------- 1. LISTA, FILTROS E INDICADORES ---------- */
+function cargarPrestamos(forzar) {
+  const fresca = prestamosCargadosEn && (Date.now() - prestamosCargadosEn) < FRESCURA_MS;
+  if (fresca && !forzar) { renderPrestamos(); return Promise.resolve(prestamos); }
+  if (prestamosPromesa && !forzar) return prestamosPromesa;
+  prestamosPromesa = llamar('obtenerPrestamos', tokenSesion()).then(function (r) {
+    prestamosPromesa = null;
+    if (!r.exito) { showToast(r.mensaje || 'No se pudieron leer los préstamos.'); return prestamos; }
+    prestamos = r.prestamos || [];
+    prestamosCargadosEn = Date.now();
+    renderPrestamos();
+    return prestamos;
+  });
+  return prestamosPromesa;
+}
+
+/** Sigue fuera de la escuela: préstamo activo o marcado como no devuelto */
+function prPendiente(p) { return p.estado === 'Activo' || p.estado === 'No devuelto'; }
+function prVencido(p) { return p.estado === 'No devuelto' || (p.estado === 'Activo' && p.vencido); }
+
+/** El documento se muestra incompleto en las listas; completo solo en el formulario y en las actas */
+function documentoOculto(p) {
+  const d = String(p.documento || '');
+  return p.tipoDoc + ' ' + (d.length > 4 ? '•••' + d.slice(-4) : d);
+}
+
+function descripcionPersona(p) {
+  const partes = [p.tipoPersona, documentoOculto(p)];
+  if (p.grado) partes.push(p.grado + (p.seccion ? ' ' + p.seccion : ''));
+  return partes.join(' · ');
+}
+
+function etiquetaPlazo(p) {
+  if (!prPendiente(p)) return { cls: 'cerrado', txt: p.estado + (p.cierre ? ' el ' + p.cierre : '') };
+  if (p.estado === 'No devuelto') return { cls: 'vencido', txt: 'No devuelto' };
+  const d = p.diasRestantes;
+  if (d == null) return { cls: '', txt: 'Sin fecha' };
+  if (d < 0) return { cls: 'vencido', txt: 'Vencido hace ' + plural(-d, 'día', 'días') };
+  if (d === 0) return { cls: 'hoy', txt: 'Vence hoy' };
+  return { cls: '', txt: 'Vence en ' + plural(d, 'día', 'días') };
+}
+
+/** Bienes del préstamo: se usan los datos actuales del inventario y, si ya no existen, el texto guardado */
+function bienesDePrestamo(p) {
+  const textos = String(p.bienes || '').split(/\s*;\s*/);
+  return p.ids.map(function (id, i) {
+    const a = buscarActivoLocal(id);
+    if (a) return { id: a.id, nombre: a.nombre, ubicacion: a.ubicacion, estado: a.estado, costo: Number(a.costo) || 0 };
+    return { id: id, nombre: String(textos[i] || id).replace(/\s*\([^)]*\)\s*$/, ''), ubicacion: '', estado: '', costo: 0 };
+  });
+}
+
+function prestamosFiltrados() {
+  const q = sinTildes(document.getElementById('prBuscar').value.trim());
+  return prestamos.filter(function (p) {
+    if (prFiltro === 'activos' && p.estado !== 'Activo') return false;
+    if (prFiltro === 'vencidos' && !prVencido(p)) return false;
+    if (prFiltro === 'cerrados' && prPendiente(p)) return false;
+    return !q || sinTildes(p.id + ' ' + p.nombre + ' ' + p.documento + ' ' + p.bienes + ' ' + p.ids.join(' ')).indexOf(q) >= 0;
+  });
+}
+
+function renderPrestamos() {
+  renderTilePrestamos();
+  actualizarBadgePrestamos();
+  const cont = document.getElementById('prLista');
+  if (!cont) return;
+  const pendientes = prestamos.filter(prPendiente);
+  const kpi = function (num, lbl, cls) { return '<div class="mapa-kpi ' + cls + '"><strong>' + num + '</strong><span>' + lbl + '</span></div>'; };
+  document.getElementById('prKpis').innerHTML =
+    kpi(prestamos.filter(function (p) { return p.estado === 'Activo'; }).length, 'Préstamos activos', 'k-prestado') +
+    kpi(prestamos.filter(prVencido).length, 'Vencidos o no devueltos', prestamos.some(prVencido) ? 'k-baja' : 'k-alta') +
+    kpi(pendientes.reduce(function (s, p) { return s + p.ids.length; }, 0), 'Bienes fuera del aula', '') +
+    kpi(prestamos.filter(function (p) { return p.estado === 'Perdido'; }).length, 'Perdidos (historial)', '');
+
+  const lista = prestamosFiltrados();
+  if (!lista.length) {
+    const vacios = { activos: 'No hay préstamos activos. Presiona “Nuevo préstamo” para registrar uno.', vencidos: 'Ningún préstamo está vencido.', cerrados: 'Todavía no hay préstamos cerrados.', todos: 'Todavía no hay préstamos.' };
+    cont.innerHTML = '<div class="gs-vacio">' + (document.getElementById('prBuscar').value.trim() ? 'Ningún préstamo coincide con la búsqueda.' : vacios[prFiltro]) + '</div>';
+    return;
+  }
+  cont.innerHTML = lista.map(htmlTarjetaPrestamo).join('');
+}
+
+function htmlTarjetaPrestamo(p) {
+  const plazo = etiquetaPlazo(p);
+  const bienes = bienesDePrestamo(p);
+  const admin = esAdminUI();
+  let acciones = '';
+  if (p.estado === 'Activo') {
+    acciones = botonAccion('primary-button btn-ok', 'abrirDevolucion', p.id, icono('check') + 'Devolver') +
+      botonAccion('secondary-button', 'abrirPerdida', p.id, 'Pérdida / no devuelto') +
+      botonAccion('secondary-button', 'editarPrestamoUI', p.id, icono('editar') + 'Editar') +
+      botonAccion('secondary-button', 'imprimirComprobante', p.id, icono('imprimir') + 'Comprobante');
+  } else if (p.estado === 'No devuelto') {
+    acciones = botonAccion('primary-button btn-ok', 'abrirDevolucion', p.id, icono('check') + 'Ya lo devolvió') +
+      botonAccion('secondary-button', 'abrirPerdida', p.id, 'Marcar perdido') +
+      botonAccion('secondary-button', 'reimprimirActaPrestamo', p.id, icono('imprimir') + 'Acta');
+  } else if (p.estado === 'Perdido') {
+    acciones = botonAccion('secondary-button', 'reimprimirActaPrestamo', p.id, icono('imprimir') + 'Acta de pérdida');
+  } else {
+    acciones = botonAccion('secondary-button', 'imprimirComprobante', p.id, icono('imprimir') + 'Comprobante');
+  }
+  if (admin) acciones += botonAccion('secondary-button', 'eliminarPrestamoUI', p.id, icono('borrar'), ' title="Eliminar (solo administradores)" aria-label="Eliminar préstamo"');
+
+  return '<article class="pr-card' + (prVencido(p) ? ' vencido' : '') + (prPendiente(p) ? '' : ' cerrado') + '">' +
+    '<div class="pr-top"><div><span class="pr-id">' + escapeHTML(p.id) + '</span>' +
+      '<h3 class="pr-nombre">' + escapeHTML(p.nombre) + '</h3>' +
+      '<p class="pr-persona">' + escapeHTML(descripcionPersona(p)) + '</p></div>' +
+      '<span class="pr-plazo ' + plazo.cls + '">' + icono('reloj') + escapeHTML(plazo.txt) + '</span></div>' +
+    '<div class="pr-bienes">' + bienes.map(function (b) { return '<span class="pr-bien" title="' + escapeHTML(b.id) + '">' + escapeHTML(b.nombre) + '</span>'; }).join('') + '</div>' +
+    '<div class="pr-fechas"><span>Prestado: <b>' + escapeHTML(p.fecha.split(' ')[0]) + '</b></span><span>Devolver: <b>' + escapeHTML(p.limite) + '</b></span>' +
+      (p.condicion ? '<span>Llegó: <b>' + escapeHTML(p.condicion) + '</b></span>' : '') + '</div>' +
+    '<div class="pr-acciones">' + acciones + '</div></article>';
+}
+
+function filtrarPrestamos(f) {
+  prFiltro = f;
+  document.querySelectorAll('#prFiltros .chip').forEach(function (c) { c.classList.toggle('on', c.dataset.f === f); });
+  renderPrestamos();
+}
+
+/** Abre la vista Préstamos mostrando solo ese préstamo (desde Inicio o el buscador) */
+function verPrestamo(id) {
+  mostrarVista('prestamos');
+  document.getElementById('prBuscar').value = id;
+  filtrarPrestamos('todos');
+}
+
+document.getElementById('prFiltros').addEventListener('click', function (e) {
+  const b = e.target.closest('.chip');
+  if (b) filtrarPrestamos(b.dataset.f);
+});
+let prBuscarTimer = null;
+document.getElementById('prBuscar').addEventListener('input', function () {
+  clearTimeout(prBuscarTimer);
+  prBuscarTimer = setTimeout(renderPrestamos, 150);
+});
+
+/* ---------- 2. FORMULARIO NUEVO / EDITAR ---------- */
+function buscarPrestamo(id) { return prestamos.find(function (p) { return p.id === id; }) || null; }
+
+function nuevoPrestamo(idBien) {
+  prEditando = null;
+  prepararFormularioPrestamo();
+  document.getElementById('prTitulo').textContent = 'Nuevo préstamo';
+  document.getElementById('prGuardar').innerHTML = icono('guardar') + 'Registrar préstamo';
+  document.getElementById('prFecha').value = fechaIsoMas(7);
+  obtenerActivos().then(function () {
+    if (idBien) agregarBienPrestamo(idBien);
+  });
+  document.getElementById('modalPrestamo').classList.remove('hidden');
+  setTimeout(function () { document.getElementById('prDoc').focus(); }, 60);
+}
+
+/** Desde la vista rápida de un bien: abre el formulario con ese bien ya agregado */
+function prestarBien(id) {
+  cerrarMueble();
+  nuevoPrestamo(id);
+}
+
+function editarPrestamoUI(id) {
+  const p = buscarPrestamo(id);
+  if (!p) return;
+  prEditando = p;
+  prepararFormularioPrestamo();
+  cambiarTipoPersona(p.tipoPersona);
+  document.getElementById('prTitulo').textContent = 'Editar préstamo ' + p.id;
+  document.getElementById('prGuardar').innerHTML = icono('guardar') + 'Guardar cambios';
+  document.getElementById('prDoc').value = p.documento;
+  document.getElementById('prNombre').value = p.nombre;
+  document.getElementById('prGrado').value = p.grado;
+  document.getElementById('prSeccion').value = p.seccion;
+  document.getElementById('prTel').value = p.telefono;
+  document.getElementById('prFecha').value = p.limiteIso;
+  document.getElementById('prObs').value = p.observaciones;
+  // Los bienes de un préstamo no se cambian: se cierra y se registra otro
+  prBienesSel = bienesDePrestamo(p);
+  renderBienesSeleccionados();
+  document.getElementById('prPasoBienes').classList.add('hidden');
+  document.getElementById('modalPrestamo').classList.remove('hidden');
+}
+
+function prepararFormularioPrestamo() {
+  document.getElementById('formPrestamo').reset();
+  limpiarErrores('formPrestamo');
+  document.getElementById('prMsg').textContent = '';
+  document.getElementById('prResultados').innerHTML = '';
+  document.getElementById('prPasoBienes').classList.remove('hidden');
+  document.getElementById('prGuardar').disabled = false;
+  prBienesSel = [];
+  renderBienesSeleccionados();
+  cambiarTipoPersona('Estudiante');
+}
+
+function cerrarModalPrestamo() { document.getElementById('modalPrestamo').classList.add('hidden'); prEditando = null; }
+
+/** Estudiante pide NIE y grado; Docente y Responsable piden DUI */
+function cambiarTipoPersona(tipo) {
+  prTipo = tipo;
+  const esEst = tipo === 'Estudiante';
+  document.querySelectorAll('#prTipo .seg-btn').forEach(function (b) {
+    const on = b.dataset.tipo === tipo;
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-checked', on ? 'true' : 'false');
+  });
+  document.getElementById('prDocLbl').innerHTML = (esEst ? 'NIE del estudiante' : 'DUI del ' + (tipo === 'Docente' ? 'docente' : 'responsable')) + ' <abbr title="obligatorio">*</abbr>';
+  document.getElementById('prDoc').placeholder = esEst ? 'Ej. 1234567' : '00000000-0';
+  document.getElementById('prDocAyuda').textContent = esEst ? 'Solo números, de 5 a 10 dígitos.' : '8 dígitos, guion y el dígito verificador.';
+  document.getElementById('prGradoWrap').classList.toggle('hidden', !esEst);
+  document.getElementById('prSeccionWrap').classList.toggle('hidden', !esEst);
+  marcarError('prDoc', '');
+  if (!esEst) { document.getElementById('prGrado').value = ''; document.getElementById('prSeccion').value = ''; }
+  else document.getElementById('prDoc').value = document.getElementById('prDoc').value.replace(/\D/g, '');
+}
+
+document.getElementById('prTipo').addEventListener('click', function (e) {
+  const b = e.target.closest('.seg-btn');
+  if (b) cambiarTipoPersona(b.dataset.tipo);
+});
+
+/* Formato automático mientras se escribe */
+document.getElementById('prDoc').addEventListener('input', function (e) {
+  const d = e.target.value.replace(/\D/g, '').slice(0, prTipo === 'Estudiante' ? 10 : 9);
+  e.target.value = prTipo !== 'Estudiante' && d.length > 8 ? d.slice(0, 8) + '-' + d.slice(8) : d;
+});
+document.getElementById('prTel').addEventListener('input', function (e) {
+  const d = e.target.value.replace(/\D/g, '').slice(0, 8);
+  e.target.value = d.length > 4 ? d.slice(0, 4) + '-' + d.slice(4) : d;
+});
+document.getElementById('prSeccion').addEventListener('input', function (e) {
+  e.target.value = e.target.value.replace(/[^a-zA-Z]/g, '').toUpperCase().slice(0, 1);
+});
+document.getElementById('prPlazos').addEventListener('click', function (e) {
+  const b = e.target.closest('.chip');
+  if (!b) return;
+  document.getElementById('prFecha').value = fechaIsoMas(b.dataset.dias);
+  marcarError('prFecha', '');
+});
+
+/** DUI salvadoreño: el último dígito se calcula con los 8 primeros (pesos 9 a 2) */
+function duiValido(dui) {
+  const m = String(dui || '').match(/^(\d{8})-?(\d)$/);
+  if (!m) return false;
+  let suma = 0;
+  for (let i = 0; i < 8; i++) suma += Number(m[1].charAt(i)) * (9 - i);
+  return (10 - (suma % 10)) % 10 === Number(m[2]);
+}
+
+function validarPrestamoUI() {
+  limpiarErrores('formPrestamo');
+  const doc = document.getElementById('prDoc').value.trim();
+  const nombre = document.getElementById('prNombre').value.trim().replace(/\s+/g, ' ');
+  const grado = document.getElementById('prGrado').value;
+  const seccion = document.getElementById('prSeccion').value.trim();
+  const tel = document.getElementById('prTel').value.replace(/\D/g, '');
+  const fecha = document.getElementById('prFecha').value;
+  let ok = true;
+
+  if (prTipo === 'Estudiante') {
+    if (!/^\d{5,10}$/.test(doc)) ok = marcarError('prDoc', 'El NIE lleva solo números (de 5 a 10 dígitos).') && ok;
+    if (!grado) ok = marcarError('prGrado', 'Elige el grado.') && ok;
+    if (seccion && !/^[A-Z]$/.test(seccion)) ok = marcarError('prSeccion', 'Una sola letra (A, B, C…).') && ok;
+  } else if (!duiValido(doc)) {
+    ok = marcarError('prDoc', /^\d{8}-?\d$/.test(doc) ? 'El dígito verificador no coincide. Revisa el DUI.' : 'Escribe el DUI completo: 00000000-0.') && ok;
+  }
+  const palabras = nombre.split(' ').filter(function (x) { return x.length > 1; });
+  if (!/^[A-Za-zÁÉÍÓÚÜÑáéíóúüñ' .-]+$/.test(nombre) || palabras.length < 2) ok = marcarError('prNombre', 'Escribe nombre y apellido (solo letras).') && ok;
+  if (tel && !/^[267]\d{7}$/.test(tel)) ok = marcarError('prTel', '8 dígitos que empiecen con 2, 6 o 7.') && ok;
+
+  if (!fecha) ok = marcarError('prFecha', 'Elige la fecha de devolución.') && ok;
+  else if (!prEditando && fecha < fechaIsoMas(0)) ok = marcarError('prFecha', 'No puede ser anterior a hoy.') && ok;
+  else if (fecha > fechaIsoMas(366)) ok = marcarError('prFecha', 'El préstamo no puede durar más de un año.') && ok;
+
+  if (!prEditando && !prBienesSel.length) {
+    document.getElementById('prBienesErr').textContent = 'Agrega al menos un bien.';
+    ok = false;
+  }
+  return ok;
+}
+
+function guardarPrestamo() {
+  const msg = document.getElementById('prMsg');
+  msg.className = 'form-msg';
+  if (!validarPrestamoUI()) {
+    msg.className = 'form-msg error';
+    msg.textContent = 'Revisa los campos marcados en rojo.';
+    const primero = document.querySelector('#formPrestamo .con-error input, #formPrestamo .con-error select');
+    if (primero) primero.focus();
+    return;
+  }
+  msg.textContent = '';
+  const btn = document.getElementById('prGuardar');
+  btn.disabled = true;
+  const datos = {
+    id: prEditando ? prEditando.id : '',
+    tipoPersona: prTipo,
+    documento: document.getElementById('prDoc').value.trim(),
+    nombre: document.getElementById('prNombre').value.trim(),
+    grado: document.getElementById('prGrado').value,
+    seccion: document.getElementById('prSeccion').value.trim(),
+    telefono: document.getElementById('prTel').value.trim(),
+    ids: prBienesSel.map(function (b) { return b.id; }),
+    fechaLimite: document.getElementById('prFecha').value,
+    observaciones: document.getElementById('prObs').value.trim(),
+    token: tokenSesion()
+  };
+  const editando = !!prEditando;
+  llamar(editando ? 'editarPrestamo' : 'registrarPrestamo', datos).then(function (r) {
+    btn.disabled = false;
+    if (!r.exito) { msg.className = 'form-msg error'; msg.textContent = r.mensaje || 'No se pudo guardar.'; return; }
+    cerrarModalPrestamo();
+    showToast(r.mensaje);
+    activosCargadosEn = 0;
+    Promise.all([cargarPrestamos(true), cargarActivos(true)]).then(function () {
+      if (vistaActual === 'mapa') { datosMapa = null; cargarMapa(); }
+      if (!editando && r.id && confirm('Préstamo ' + r.id + ' registrado.\n¿Imprimir el comprobante para que la persona lo firme?')) imprimirComprobante(r.id);
+    });
+  });
+}
+
+/* Agregar bienes: por búsqueda o escaneando su QR */
+function motivoNoPrestable(a) {
+  if (prBienesSel.some(function (b) { return idNorm(b.id) === idNorm(a.id); })) return 'ya agregado';
+  if (a.prestamo) return 'prestado en ' + a.prestamo;
+  if (/baja/i.test(a.estado)) return 'dado de baja';
+  return '';
+}
+
+function renderResultadosBien() {
+  const q = sinTildes(document.getElementById('prBuscarBien').value.trim());
+  const cont = document.getElementById('prResultados');
+  if (q.length < 2) { cont.innerHTML = ''; return; }
+  const res = todosLosActivos.filter(function (a) { return sinTildes(a.nombre + ' ' + a.id + ' ' + a.ubicacion).indexOf(q) >= 0; }).slice(0, 8);
+  cont.innerHTML = res.length ? res.map(function (a) {
+    const motivo = motivoNoPrestable(a);
+    return '<button type="button" class="pr-res" data-accion="agregarBienPrestamo" data-arg="' + escapeHTML(a.id) + '"' + (motivo ? ' disabled' : '') + '>' +
+      '<span><strong>' + escapeHTML(a.nombre) + '</strong> <small>' + escapeHTML(a.id) + ' · ' + escapeHTML(a.ubicacion || 'sin aula') + '</small></span>' +
+      '<em>' + (motivo ? escapeHTML(motivo) : '+ Agregar') + '</em></button>';
+  }).join('') : '<div class="gs-vacio">Ningún bien coincide.</div>';
+}
+
+function agregarBienPrestamo(id) {
+  const a = buscarActivoLocal(id);
+  if (!a) { showToast('No se encontró el bien ' + id); return; }
+  const motivo = motivoNoPrestable(a);
+  if (motivo) { showToast(a.nombre + ': ' + motivo + '.'); return; }
+  if (prBienesSel.length >= 50) { showToast('Máximo 50 bienes por préstamo.'); return; }
+  prBienesSel.push({ id: a.id, nombre: a.nombre, ubicacion: a.ubicacion, estado: a.estado, costo: Number(a.costo) || 0 });
+  document.getElementById('prBuscarBien').value = '';
+  document.getElementById('prResultados').innerHTML = '';
+  document.getElementById('prBienesErr').textContent = '';
+  renderBienesSeleccionados();
+}
+
+function quitarBienPrestamo(id) {
+  prBienesSel = prBienesSel.filter(function (b) { return b.id !== id; });
+  renderBienesSeleccionados();
+}
+
+function renderBienesSeleccionados() {
+  const cont = document.getElementById('prSeleccion');
+  if (!prBienesSel.length) { cont.innerHTML = '<span class="chips-hint">Todavía no agregas bienes.</span>'; return; }
+  cont.innerHTML = prBienesSel.map(function (b) {
+    return '<span class="pr-sel" title="' + escapeHTML(b.id) + '">' + escapeHTML(b.nombre) +
+      (prEditando ? '' : '<button type="button" aria-label="Quitar ' + escapeHTML(b.nombre) + '" data-accion="quitarBienPrestamo" data-arg="' + escapeHTML(b.id) + '">' + icono('cerrar') + '</button>') + '</span>';
+  }).join('');
+}
+
+function prEscanearQR(event) {
+  const archivo = event.target.files && event.target.files[0];
+  event.target.value = '';
+  if (!archivo) return;
+  showToast('Leyendo el código…');
+  decodificarQRDeArchivo(archivo)
+    .then(function (texto) { return obtenerActivos().then(function () { agregarBienPrestamo(extraerIdDeQR(texto)); }); })
+    .catch(function () { showToast('No se encontró un QR en la foto. Intenta con más luz y más cerca.'); });
+}
+
+let prBienTimer = null;
+document.getElementById('prBuscarBien').addEventListener('input', function () {
+  clearTimeout(prBienTimer);
+  prBienTimer = setTimeout(renderResultadosBien, 150);
+});
+
+/* ---------- 3. CERRAR PRÉSTAMO ---------- */
+function abrirDevolucion(id) { abrirCerrarPrestamo(id, 'Devuelto'); }
+function abrirPerdida(id) {
+  const p = buscarPrestamo(id);
+  abrirCerrarPrestamo(id, p && p.estado === 'No devuelto' ? 'Perdido' : 'No devuelto');
+}
+
+function abrirCerrarPrestamo(id, resultado) {
+  cpPrestamo = buscarPrestamo(id);
+  if (!cpPrestamo) return;
+  const p = cpPrestamo;
+  document.getElementById('cpTitulo').textContent = 'Cerrar préstamo ' + p.id;
+  document.getElementById('cpInfo').textContent = p.nombre + ' · ' + plural(p.ids.length, 'bien', 'bienes') + ' · debía devolverse el ' + p.limite;
+  document.getElementById('cpCondicion').value = 'Bueno';
+  document.getElementById('cpObs').value = '';
+  document.getElementById('cpMsg').textContent = '';
+  document.getElementById('cpConfirmar').disabled = false;
+  // Un préstamo "No devuelto" solo puede terminar como devuelto o perdido
+  document.querySelector('#cpResultado [data-r="No devuelto"]').disabled = p.estado === 'No devuelto';
+  elegirResultado(resultado);
+  document.getElementById('modalCerrarPr').classList.remove('hidden');
+}
+
+function cerrarModalCerrarPr() { document.getElementById('modalCerrarPr').classList.add('hidden'); cpPrestamo = null; }
+
+function elegirResultado(r) {
+  cpResultado = r;
+  document.querySelectorAll('#cpResultado .seg-btn').forEach(function (b) {
+    const on = b.dataset.r === r;
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-checked', on ? 'true' : 'false');
+  });
+  const devuelto = r === 'Devuelto';
+  document.getElementById('cpCondicionWrap').classList.toggle('hidden', !devuelto);
+  document.getElementById('cpObsLbl').innerHTML = devuelto ? 'Observaciones (opcional)' : '¿Qué pasó? <abbr title="obligatorio">*</abbr>';
+  document.getElementById('cpObs').placeholder = devuelto ? 'Ej. Llegó con la pata floja' : 'Ej. El estudiante dice que lo dejó en el bus';
+  document.getElementById('cpAyuda').textContent = {
+    'Devuelto': 'Si llegó dañado o regular, el bien cambia a ese estado en el inventario.',
+    'No devuelto': 'Se imprimirá el acta de no devolución. El bien sigue registrado como prestado.',
+    'Perdido': 'Se imprimirá el acta de pérdida y el bien pasa a “Para Baja”.'
+  }[r];
+  document.getElementById('cpConfirmar').innerHTML = devuelto ? icono('check') + 'Registrar devolución' : icono('imprimir') + 'Confirmar e imprimir acta';
+  document.getElementById('cpConfirmar').classList.toggle('btn-peligro', r === 'Perdido');
+}
+
+document.getElementById('cpResultado').addEventListener('click', function (e) {
+  const b = e.target.closest('.seg-btn');
+  if (b && !b.disabled) elegirResultado(b.dataset.r);
+});
+
+function confirmarCerrarPr() {
+  if (!cpPrestamo) return;
+  const obs = document.getElementById('cpObs').value.trim();
+  const msg = document.getElementById('cpMsg');
+  if (cpResultado !== 'Devuelto' && obs.length < 5) {
+    msg.className = 'form-msg error';
+    msg.textContent = 'Describe qué pasó (mínimo 5 letras): queda escrito en el acta.';
+    document.getElementById('cpObs').focus();
+    return;
+  }
+  const btn = document.getElementById('cpConfirmar');
+  btn.disabled = true;
+  const resultado = cpResultado;
+  const condicion = document.getElementById('cpCondicion').value;
+  llamar('cerrarPrestamo', {
+    id: cpPrestamo.id, resultado: resultado, condicion: resultado === 'Devuelto' ? condicion : '',
+    observaciones: obs, token: tokenSesion()
+  }).then(function (r) {
+    btn.disabled = false;
+    if (!r.exito) { msg.className = 'form-msg error'; msg.textContent = r.mensaje || 'No se pudo cerrar el préstamo.'; return; }
+    cerrarModalCerrarPr();
+    showToast(r.mensaje);
+    if (resultado !== 'Devuelto') {
+      const p = r.prestamo;
+      imprimirActaPrestamo(p, resultado, (r.bienes && r.bienes.length) ? r.bienes : bienesDePrestamo(p), r.fecha, obs);
+    }
+    activosCargadosEn = 0;
+    cargarPrestamos(true);
+    cargarActivos(true);
+  });
+}
+
+/* ---------- 4. DOCUMENTOS IMPRIMIBLES ---------- */
+function tablaPersona(p) {
+  const fila = function (k, v) { return v ? '<tr><th>' + k + '</th><td>' + escapeHTML(v) + '</td></tr>' : ''; };
+  return '<table class="inf-datos">' +
+    fila('Nombre completo', p.nombre) +
+    fila('Tipo de persona', p.tipoPersona) +
+    fila(p.tipoDoc === 'NIE' ? 'NIE' : 'DUI', p.documento) +
+    fila('Grado y sección', p.grado ? p.grado + (p.seccion ? ' "' + p.seccion + '"' : '') : '') +
+    fila('Teléfono', p.telefono) +
+    fila('Fecha del préstamo', p.fecha) +
+    fila('Fecha límite de devolución', p.limite) +
+  '</table>';
+}
+
+function tablaBienes(bienes, conValor) {
+  const total = bienes.reduce(function (s, b) { return s + (Number(b.costo) || 0); }, 0);
+  return '<table class="inf-tabla"><thead><tr><th>#</th><th>ID</th><th>Bien</th><th>Aula de origen</th>' + (conValor ? '<th>Valor</th>' : '<th>Estado al prestar</th>') + '</tr></thead><tbody>' +
+    bienes.map(function (b, i) {
+      return '<tr><td>' + (i + 1) + '</td><td>' + escapeHTML(b.id) + '</td><td>' + escapeHTML(b.nombre) + '</td><td>' + escapeHTML(b.ubicacion || '—') + '</td><td>' +
+        (conValor ? dinero(b.costo) : escapeHTML(b.estadoAnterior || b.estado || '—')) + '</td></tr>';
+    }).join('') +
+    (conValor ? '<tr class="inf-total"><td colspan="4">Valor total (' + plural(bienes.length, 'bien', 'bienes') + ')</td><td>' + dinero(total) + '</td></tr>' : '') +
+  '</tbody></table>';
+}
+
+function firmaPersona(p) {
+  return p.tipoPersona === 'Estudiante' ? 'Padre, madre o encargado(a) de ' + escapeHTML(p.nombre) : escapeHTML(p.nombre) + ' · ' + escapeHTML(p.tipoPersona);
+}
+
+/** Comprobante de préstamo para que la persona lo firme al recibir los bienes */
+function imprimirComprobante(id) {
+  const p = buscarPrestamo(id);
+  if (!p) return;
+  imprimirHoja(
+    encabezadoOficial('Comprobante de préstamo de bienes', escapeHTML(p.id) + '<br>' + escapeHTML(p.fecha)) +
+    '<p class="inf-texto">El Centro Escolar General Francisco Morazán entrega en calidad de préstamo los bienes detallados abajo. ' +
+    'La persona que los recibe se compromete a cuidarlos y a devolverlos en el mismo estado <b>a más tardar el ' + escapeHTML(p.limite) + '</b>. ' +
+    'En caso de pérdida o daño por mal uso, responderá por su reparación o reposición.</p>' +
+    tablaPersona(p) + tablaBienes(bienesDePrestamo(p), false) +
+    (p.observaciones ? '<p class="inf-texto mt-12"><b>Observaciones:</b> ' + escapeHTML(p.observaciones) + '</p>' : '') +
+    '<div class="inf-firmas"><div><span></span>Recibe · ' + firmaPersona(p) + '</div>' +
+    '<div><span></span>Entrega · ' + escapeHTML(p.registradoPor || 'Encargado(a) de inventario') + '</div>' +
+    '<div><span></span>Visto bueno · Dirección</div></div>' +
+    '<p class="inf-nota">Documento generado por SICAM. Estado del préstamo: ' + escapeHTML(p.estado) + '.</p>'
+  );
+}
+
+/**
+ * Acta de pérdida o de no devolución.
+ * p = préstamo (como lo da el servidor), bienes = [{ id, nombre, ubicacion, costo }]
+ */
+function imprimirActaPrestamo(p, resultado, bienes, fecha, descripcion) {
+  const perdido = resultado === 'Perdido';
+  const total = bienes.reduce(function (s, b) { return s + (Number(b.costo) || 0); }, 0);
+  imprimirHoja(
+    encabezadoOficial(perdido ? 'Acta de pérdida de bienes prestados' : 'Acta de no devolución de bienes prestados',
+      'Acta ' + escapeHTML(p.id) + (perdido ? '-P' : '-ND') + '<br>' + escapeHTML(fecha || '')) +
+    '<span class="inf-sello">' + (perdido ? 'BIEN PERDIDO' : 'NO DEVUELTO') + '</span>' +
+    '<p class="inf-texto">Por medio de la presente se hace constar que el préstamo <b>' + escapeHTML(p.id) + '</b>, entregado el ' + escapeHTML(p.fecha) +
+    ' a <b>' + escapeHTML(p.nombre) + '</b> (' + escapeHTML(p.tipoPersona) + ', ' + escapeHTML(p.tipoDoc) + ' ' + escapeHTML(p.documento) + ')' +
+    ', con fecha límite de devolución el ' + escapeHTML(p.limite) + ', ' +
+    (perdido ? 'se cierra porque los bienes <b>se perdieron</b>.' : '<b>no fue devuelto</b> en el plazo acordado.') + '</p>' +
+    tablaPersona(p) + tablaBienes(bienes, true) +
+    '<p class="inf-texto mt-12"><b>Descripción de lo sucedido:</b> ' + escapeHTML(descripcion || '—') + '</p>' +
+    '<p class="inf-texto">' + (perdido
+      ? 'La persona responsable se compromete a reponer los bienes o a cubrir su valor (' + dinero(total) + ') en el plazo que acuerde con la Dirección. Los bienes pasan al estado “Para Baja” en el inventario.'
+      : 'La persona responsable se compromete a devolver los bienes a más tardar el día ____ / ____ / ________. Si no los devuelve, el préstamo se cerrará como pérdida.') + '</p>' +
+    '<div class="inf-firmas"><div><span></span>' + firmaPersona(p) + '</div>' +
+    '<div><span></span>Encargado(a) de inventario</div><div><span></span>Director(a) · Sello</div></div>' +
+    '<p class="inf-nota">Documento generado por SICAM · Centro Escolar General Francisco Morazán.</p>'
+  );
+}
+
+/** Vuelve a imprimir el acta de un préstamo ya cerrado como perdido o no devuelto */
+function reimprimirActaPrestamo(id) {
+  const p = buscarPrestamo(id);
+  if (!p) return;
+  const notas = String(p.observaciones || '').split(' | ');
+  const ultima = notas.filter(function (n) { return n.indexOf(p.estado + ':') >= 0; }).pop() || notas.pop() || '';
+  imprimirActaPrestamo(p, p.estado, bienesDePrestamo(p), p.cierre, ultima.replace(/^\[[^\]]*\]\s*[^:]*:\s*/, ''));
+}
+
+/* ---------- 5. ELIMINAR Y CUADRO DE INICIO ---------- */
+function eliminarPrestamoUI(id) {
+  if (!confirm('¿Eliminar el préstamo ' + id + '? Úsalo solo si se registró por error. No se puede deshacer.')) return;
+  llamar('eliminarPrestamo', { id: id, token: tokenSesion() }).then(function (r) {
+    showToast(r.mensaje || 'Listo');
+    if (r.exito) { cargarPrestamos(true); cargarActivos(true); }
+  });
+}
+
+function renderTilePrestamos() {
+  const pendientes = prestamos.filter(prPendiente);
+  const vencidos = prestamos.filter(prVencido);
+  document.getElementById('dashPrestActivos').textContent = pendientes.length;
+  document.getElementById('dashPrestVencidos').textContent = vencidos.length;
+  const cont = document.getElementById('dashPrestLista');
+  if (!pendientes.length) { cont.innerHTML = '<div class="hist-vacio">Sin préstamos pendientes.</div>'; return; }
+  // Primero los vencidos, luego los que vencen antes
+  const orden = pendientes.slice().sort(function (a, b) {
+    return (prVencido(b) - prVencido(a)) || ((a.diasRestantes == null ? 999 : a.diasRestantes) - (b.diasRestantes == null ? 999 : b.diasRestantes));
+  });
+  cont.innerHTML = orden.slice(0, 4).map(function (p) {
+    const plazo = etiquetaPlazo(p);
+    return botonAccion('dp-item' + (prVencido(p) ? ' vencido' : ''), 'verPrestamo', p.id,
+      '<strong>' + escapeHTML(p.nombre) + '</strong><span>' + escapeHTML(plazo.txt) + '</span>');
+  }).join('');
+}
+
+function actualizarBadgePrestamos() {
+  const n = prestamos.filter(prVencido).length;
+  const badge = document.getElementById('navBadgePrestamos');
+  badge.textContent = n;
+  badge.title = plural(n, 'préstamo vencido', 'préstamos vencidos');
+  badge.classList.toggle('hidden', !n);
+}
+</script>

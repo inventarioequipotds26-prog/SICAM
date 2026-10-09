@@ -1,0 +1,552 @@
+<script>
+/* =====================================================================
+   SICAM · js/Gestion — ciclo de vida y administración
+     1. Mantenimiento preventivo y ciclo de vida
+     2. Bajas y donaciones (con acta imprimible)
+     3. Kits de aula (traslado en bloque)
+     4. Avisos por correo y Telegram (solo administradores)
+   ===================================================================== */
+
+let gestion = null;
+let gestionCargadaEn = 0;
+let gsTabActual = 'mant';
+let gsMantFiltro = 'vencidos';
+let gsDestino = '';
+let kitEditando = null;
+let kitMoviendo = null;
+
+const ETAPAS_CICLO = [
+  { k: 'excelente', t: 'Excelente' }, { k: 'bueno', t: 'Bueno' }, { k: 'regular', t: 'Regular' },
+  { k: 'danado', t: 'Dañado' }, { k: 'mant', t: 'En mantenimiento' }, { k: 'parabaja', t: 'Para baja' }, { k: 'debaja', t: 'De baja' }
+];
+
+function etapaCiclo(estado) {
+  const e = String(estado || '').toLowerCase();
+  if (esDeBaja(e)) return 'debaja';
+  if (e.indexOf('baja') >= 0) return 'parabaja';
+  if (e.indexOf('manten') >= 0) return 'mant';
+  if (e.indexOf('dañ') >= 0 || e.indexOf('dan') >= 0 || e.indexOf('roto') >= 0) return 'danado';
+  if (e.indexOf('regular') >= 0) return 'regular';
+  if (e.indexOf('excelente') >= 0) return 'excelente';
+  return 'bueno';
+}
+
+
+
+function cargarGestion(forzar) {
+  const fresca = gestion && (Date.now() - gestionCargadaEn) < FRESCURA_MS;
+  if (fresca && !forzar) { renderGestion(); return Promise.resolve(); }
+  document.getElementById('gsCargando').classList.remove('hidden');
+  return Promise.all([obtenerActivos(forzar), cargarAulasMaestra(), llamar('obtenerGestion', tokenSesion())]).then(function (r) {
+    document.getElementById('gsCargando').classList.add('hidden');
+    if (!r[2].exito) { showToast(r[2].mensaje || 'No se pudo cargar la gestión.'); return; }
+    gestion = r[2];
+    gestionCargadaEn = Date.now();
+    renderGestion();
+  });
+}
+
+/** Recarga datos después de guardar algo */
+function refrescarTrasCambio() {
+  activosCargadosEn = 0;
+  gestion = null;
+  datosMapa = null;
+  return cargarGestion(true);
+}
+
+function gsTab(tab) {
+  if ((tab === 'avisos' || tab === 'usuarios') && !esAdminUI()) tab = 'mant';
+  gsTabActual = tab;
+  document.querySelectorAll('#gsTabs .gs-tab').forEach(function (b) { b.classList.toggle('on', b.dataset.tab === tab); });
+  ['mant', 'bajas', 'kits', 'avisos', 'usuarios'].forEach(function (t) {
+    const id = { mant: 'gsMant', bajas: 'gsBajas', kits: 'gsKits', avisos: 'gsAvisos', usuarios: 'gsUsuarios' }[t];
+    document.getElementById(id).classList.toggle('hidden', t !== tab);
+  });
+  if (tab === 'usuarios') cargarUsuarios();
+  if (gestion) renderGestion();
+}
+
+function renderGestion() {
+  if (!gestion) return;
+  if (gsTabActual === 'mant') renderMantenimiento();
+  if (gsTabActual === 'bajas') renderBajas();
+  if (gsTabActual === 'kits') renderKits();
+  if (gsTabActual === 'avisos') renderAvisos();
+}
+
+function nombresAulas() {
+  const vistos = {}, out = [];
+  (aulasMaestra || []).map(function (m) { return m.nombre; }).concat(listaAulasActivos()).forEach(function (n) {
+    const k = String(n || '').toLowerCase().trim();
+    if (k && !vistos[k]) { vistos[k] = true; out.push(n); }
+  });
+  return out;
+}
+
+function mismaAula(a, b) {
+  const c = function (n) { return String(n || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/\s+/g, ' ').trim(); };
+  return c(a) === c(b);
+}
+
+/* ----- Listas con casillas ----- */
+function itemGs(a, etiqueta, clase, marcado) {
+  return '<label class="gs-item">' +
+    '<input type="checkbox" value="' + escapeHTML(a.id) + '"' + (marcado ? ' checked' : '') + '>' +
+    '<span class="gs-item-txt"><strong>' + escapeHTML(a.nombre) + '</strong>' +
+    '<span>' + escapeHTML(a.id) + ' · ' + escapeHTML(a.ubicacion || 'Sin aula') + '</span></span>' +
+    (etiqueta ? '<span class="gs-tag ' + (clase || '') + '">' + etiqueta + '</span>' : '') +
+    '</label>';
+}
+
+function seleccionados(contId) {
+  return Array.prototype.map.call(document.querySelectorAll('#' + contId + ' input[type=checkbox]:checked'), function (c) { return c.value; });
+}
+
+function gsMarcarTodos(contId, si) {
+  document.querySelectorAll('#' + contId + ' input[type=checkbox]').forEach(function (c) { c.checked = si; });
+  gsContar();
+}
+/** Casilla «Todos»: marca o desmarca la lista indicada en su atributo data-lista */
+function marcarTodosDesde(e) {
+  gsMarcarTodos(e.target.dataset.lista, e.target.checked);
+}
+
+function gsContar() {
+  const txt = function (n) { return n === 1 ? '1 seleccionado' : n + ' seleccionados'; };
+  document.getElementById('gsMantSel').textContent = txt(seleccionados('gsMantLista').length);
+  document.getElementById('gsBajaSel').textContent = txt(seleccionados('gsBajaLista').length);
+  document.getElementById('kitSel').textContent = txt(seleccionados('kitMuebles').length);
+}
+
+['gsMantLista', 'gsBajaLista', 'kitMuebles'].forEach(function (id) {
+  document.getElementById(id).addEventListener('change', gsContar);
+});
+
+/* ----- Mantenimiento y ciclo de vida ----- */
+function renderMantenimiento() {
+  // Línea del ciclo de vida con cuántos bienes hay en cada etapa
+  const cuenta = {};
+  todosLosActivos.forEach(function (a) { const k = etapaCiclo(a.estado); cuenta[k] = (cuenta[k] || 0) + 1; });
+  document.getElementById('cicloLinea').innerHTML = ETAPAS_CICLO.map(function (s, i) {
+    return (i ? '<span class="ciclo-flecha">›</span>' : '') +
+      '<button type="button" class="ciclo-paso c-' + s.k + '" data-accion="verEtapaEnInventario" data-arg="' + s.k + '" title="Ver en Inventario">' +
+      '<b>' + (cuenta[s.k] || 0) + '</b><span>' + s.t + '</span></button>';
+  }).join('');
+
+  const g = gestion;
+  const kpi = function (num, lbl, cls, f) {
+    return '<button type="button" class="mapa-kpi ' + cls + (gsMantFiltro === f ? ' sel' : '') + '"' + (f ? ' data-accion="filtrarMant" data-arg="' + f + '"' : ' disabled') + '>' +
+      '<strong>' + num + '</strong><span>' + lbl + '</span></button>';
+  };
+  document.getElementById('gsKpis').innerHTML =
+    kpi(g.vencidos.length, 'Mantenimiento vencido', g.vencidos.length ? 'k-baja' : 'k-alta', 'vencidos') +
+    kpi(g.proximos.length, 'Vence en 30 días', g.proximos.length ? 'k-media' : 'k-alta', 'proximos') +
+    kpi(g.proponer.length, 'Con ' + 3 + '+ fallas en 12 meses', g.proponer.length ? 'k-baja' : 'k-alta', 'proponer') +
+    kpi(g.alDia, 'Al día', 'k-alta', '');
+
+  const sel = document.getElementById('gsMantAula');
+  const actual = sel.value;
+  sel.innerHTML = '<option value="all">Todas las aulas</option>' + nombresAulas().map(function (n) {
+    return '<option value="' + escapeHTML(n) + '">' + escapeHTML(n) + '</option>';
+  }).join('');
+  sel.value = Array.prototype.some.call(sel.options, function (o) { return o.value === actual; }) ? actual : 'all';
+  renderMantLista();
+}
+
+function verEtapaEnInventario(k) {
+  const mapa = { bueno: 'bueno', regular: 'regular', danado: 'dañado', mant: 'mantenimiento', parabaja: 'baja', debaja: 'baja', excelente: 'all' };
+  mostrarVista('inventario');
+  document.getElementById('estadoFilter').value = mapa[k] || 'all';
+  if (k === 'excelente') document.getElementById('searchInput').value = '';
+  renderInventario(true);
+}
+
+function filtrarMant(f) {
+  gsMantFiltro = f;
+  document.querySelectorAll('#gsMantFiltro .chip').forEach(function (c) { c.classList.toggle('on', c.dataset.f === f); });
+  renderMantenimiento();
+}
+document.getElementById('gsMantFiltro').addEventListener('click', function (e) {
+  const b = e.target.closest('.chip');
+  if (b) filtrarMant(b.dataset.f);
+});
+
+function renderMantLista() {
+  const aula = document.getElementById('gsMantAula').value;
+  let lista = gestion[gsMantFiltro] || [];
+  if (aula !== 'all') lista = lista.filter(function (x) { return mismaAula(x.ubicacion, aula); });
+  const cont = document.getElementById('gsMantLista');
+  const proponer = gsMantFiltro === 'proponer';
+  document.getElementById('gsBtnMant').classList.toggle('hidden', proponer);
+  document.getElementById('gsBtnProponer').classList.toggle('hidden', !proponer);
+  document.getElementById('gsMantTodos').checked = false;
+  const MAX = 200;
+  if (!lista.length) {
+    cont.innerHTML = '<div class="gs-vacio">' + ({ vencidos: '✓ No hay mantenimientos vencidos.', proximos: 'Nada vence en los próximos 30 días.', proponer: 'Ningún bien tiene 3 o más fallas en los últimos 12 meses.' })[gsMantFiltro] + '</div>';
+  } else {
+    cont.innerHTML = lista.slice(0, MAX).map(function (x) {
+      let tag, cls;
+      if (proponer) { tag = x.fallas12 + ' fallas en 12 meses'; cls = 't-mal'; }
+      else if (x.dias < 0) { tag = 'Vencido hace ' + (-x.dias) + ' día' + (x.dias === -1 ? '' : 's'); cls = 't-mal'; }
+      else { tag = x.dias === 0 ? 'Vence hoy' : 'En ' + x.dias + ' día' + (x.dias === 1 ? '' : 's'); cls = 't-medio'; }
+      return itemGs(x, tag, cls);
+    }).join('') + (lista.length > MAX ? '<div class="gs-vacio">Se muestran ' + MAX + ' de ' + lista.length + '. Filtra por aula para ver el resto.</div>' : '');
+  }
+  const ini = gestion.inicio ? ' Para los bienes sin historial, la cuenta empezó el ' + escapeHTML(gestion.inicio) + '.' : '';
+  document.getElementById('gsMantNota').innerHTML = proponer
+    ? 'Estos bienes se han reportado muchas veces. Pásalos a “Para Baja” y en la pestaña <b>Bajas y donaciones</b> decides si se reparan, se donan o se reciclan.'
+    : 'Cada bien lleva mantenimiento cada ' + (gestion.config.mesesDefecto || 12) + ' meses (equipos eléctricos cada ' + (gestion.config.mesesEquipo || 6) + '). Una reparación también cuenta como mantenimiento.' + ini;
+  gsContar();
+}
+
+function abrirModalMant() {
+  const ids = seleccionados('gsMantLista');
+  if (!ids.length) { showToast('Marca al menos un bien.'); return; }
+  document.getElementById('mantCuantos').textContent = ids.length === 1 ? '1 bien seleccionado' : ids.length + ' bienes seleccionados';
+  document.getElementById('mantDetalle').value = '';
+  document.getElementById('mantEstado').value = '';
+  document.getElementById('mantConfirmar').disabled = false;
+  document.getElementById('modalMant').classList.remove('hidden');
+}
+function cerrarModalMant() { document.getElementById('modalMant').classList.add('hidden'); }
+
+function confirmarMant() {
+  const btn = document.getElementById('mantConfirmar');
+  btn.disabled = true;
+  llamar('registrarMantenimiento', {
+    ids: seleccionados('gsMantLista'),
+    detalle: document.getElementById('mantDetalle').value.trim(),
+    nuevoEstado: document.getElementById('mantEstado').value,
+    token: tokenSesion()
+  }).then(function (r) {
+    btn.disabled = false;
+    showToast(r.mensaje || 'Listo');
+    if (r.exito) { cerrarModalMant(); refrescarTrasCambio(); }
+  });
+}
+
+function proponerBaja(ids, boton) {
+  if (!ids.length) { showToast('Marca al menos un bien.'); return; }
+  if (boton) boton.disabled = true;
+  llamar('cambiarEstadoCiclo', { ids: ids, estado: 'Para Baja', motivo: 'Propuesto para baja', token: tokenSesion() })
+    .then(function (r) {
+      if (boton) boton.disabled = false;
+      showToast(r.mensaje || 'Listo');
+      if (r.exito) refrescarTrasCambio();
+    });
+}
+function proponerBajaUno(id) { proponerBaja([id], null); }
+function proponerBajaSeleccion() { proponerBaja(seleccionados('gsMantLista'), document.getElementById('gsBtnProponer')); }
+
+/* ----- Bajas y donaciones ----- */
+function renderBajas() {
+  const para = todosLosActivos.filter(function (a) { return etapaCiclo(a.estado) === 'parabaja'; });
+  document.getElementById('gsBajaTodos').checked = false;
+  document.getElementById('gsBajaLista').innerHTML = para.length
+    ? para.map(function (a) { return itemGs(a, '$' + (Number(a.costo) || 0).toFixed(2), 't-gris'); }).join('')
+    : '<div class="gs-vacio">No hay bienes “Para Baja”. ' + (esAdminUI() ? 'Puedes proponerlos desde la pestaña Mantenimiento o con el buscador de abajo.' : 'Cuando el administrador proponga alguno, aparecerá aquí para que lo autorices.') + '</div>';
+  document.querySelectorAll('#gsDestinos .gs-destino').forEach(function (b) { b.classList.toggle('on', b.dataset.d === gsDestino); });
+
+  // Historial y resumen por destino
+  const hist = gestion.bajas || [];
+  const porDestino = {};
+  let valor = 0;
+  hist.forEach(function (b) {
+    porDestino[b.destino] = (porDestino[b.destino] || 0) + 1;
+    if (b.destino !== 'Reparar') valor += b.costo;
+  });
+  document.getElementById('gsBajaResumen').innerHTML = hist.length
+    ? Object.keys(porDestino).map(function (d) { return '<span class="gs-pill">' + escapeHTML(d) + ': <b>' + porDestino[d] + '</b></span>'; }).join('') +
+      '<span class="gs-pill">Valor dado de baja: <b>$' + valor.toFixed(2) + '</b></span>'
+    : '';
+  document.getElementById('gsBajaHist').innerHTML = hist.length
+    ? hist.slice(0, 100).map(function (b) {
+        return '<tr><td>' + escapeHTML(b.fecha) + '</td><td><strong>' + escapeHTML(b.nombre) + '</strong><br><small>' + escapeHTML(b.id) + '</small></td>' +
+          '<td>' + escapeHTML(b.destino) + '</td><td>' + escapeHTML(b.detalle) + '</td>' +
+          '<td>' + botonAccion('link-btn', 'reimprimirActa', b.acta, escapeHTML(b.acta)) + '</td></tr>';
+      }).join('')
+    : '<tr><td colspan="5" class="gs-vacio">Todavía no hay bajas registradas.</td></tr>';
+  gsContar();
+}
+
+document.getElementById('gsDestinos').addEventListener('click', function (e) {
+  const b = e.target.closest('.gs-destino');
+  if (!b) return;
+  gsDestino = b.dataset.d;
+  document.querySelectorAll('#gsDestinos .gs-destino').forEach(function (x) { x.classList.toggle('on', x === b); });
+});
+
+let bajaBuscarTimer = null;
+document.getElementById('gsBajaBuscar').addEventListener('input', function () {
+  clearTimeout(bajaBuscarTimer);
+  bajaBuscarTimer = setTimeout(function () {
+    const q = document.getElementById('gsBajaBuscar').value.toLowerCase().trim();
+    const cont = document.getElementById('gsBajaResultados');
+    if (q.length < 2) { cont.innerHTML = ''; return; }
+    const res = todosLosActivos.filter(function (a) {
+      return etapaCiclo(a.estado) !== 'parabaja' && !esDeBaja(a.estado) &&
+        ((a.nombre || '').toLowerCase().indexOf(q) >= 0 || (a.id || '').toLowerCase().indexOf(q) >= 0);
+    }).slice(0, 6);
+    cont.innerHTML = res.length ? res.map(function (a) {
+      return '<div class="gs-res"><span><strong>' + escapeHTML(a.nombre) + '</strong> · ' + escapeHTML(a.id) + ' · ' + escapeHTML(a.ubicacion || 'Sin aula') + '</span>' +
+        botonAccion('secondary-button btn-sm', 'proponerBajaUno', a.id, 'Proponer') + '</div>';
+    }).join('') : '<div class="gs-vacio">Sin resultados.</div>';
+  }, 200);
+});
+
+function registrarBajaUI() {
+  const ids = seleccionados('gsBajaLista');
+  if (!ids.length) { showToast('Marca al menos un bien.'); return; }
+  if (!gsDestino) { showToast('Elige el destino: repuestos, reparar, donación o reciclaje.'); return; }
+  const btn = document.getElementById('gsBtnBaja');
+  btn.disabled = true;
+  const detalle = document.getElementById('gsBajaDetalle').value.trim();
+  llamar('registrarBaja', { ids: ids, destino: gsDestino, detalle: detalle, token: tokenSesion() }).then(function (r) {
+    btn.disabled = false;
+    showToast(r.mensaje || 'Listo');
+    if (!r.exito) return;
+    document.getElementById('gsBajaDetalle').value = '';
+    if (r.destino !== 'Reparar' && r.bienes && r.bienes.length) {
+      imprimirActa({ acta: r.acta, fecha: r.fecha, destino: r.destino, detalle: detalle, bienes: r.bienes });
+    }
+    gsDestino = '';
+    refrescarTrasCambio();
+  });
+}
+
+function reimprimirActa(acta) {
+  const filas = (gestion.bajas || []).filter(function (b) { return b.acta === acta; });
+  if (!filas.length) return;
+  imprimirActa({ acta: acta, fecha: filas[0].fecha, destino: filas[0].destino, detalle: filas[0].detalle, bienes: filas });
+}
+
+/** Acta de baja con formato oficial (se imprime o se guarda como PDF) */
+function imprimirActa(d) {
+  const fmt = dinero;
+  const total = d.bienes.reduce(function (s, b) { return s + (Number(b.costo) || 0); }, 0);
+  const motivo = { 'Repuestos': 'aprovechamiento de piezas como repuestos', 'Donación': 'donación', 'Reciclaje': 'reciclaje' }[d.destino] || d.destino;
+  imprimirHoja(
+    encabezadoOficial('Acta de baja de bienes · ' + d.destino, escapeHTML(d.acta) + '<br>' + escapeHTML(d.fecha)) +
+    '<p class="inf-filtros">Por medio de la presente se hace constar que los bienes detallados a continuación se dan de baja del inventario activo del centro escolar para <b>' + escapeHTML(motivo) + '</b>' +
+    (d.detalle ? ' (' + escapeHTML(d.detalle) + ')' : '') + '.</p>' +
+    '<table class="inf-tabla"><thead><tr><th>#</th><th>ID</th><th>Bien</th><th>Categoría</th><th>Última ubicación</th><th>Estado anterior</th><th>Valor</th></tr></thead><tbody>' +
+    d.bienes.map(function (b, i) {
+      return '<tr><td>' + (i + 1) + '</td><td>' + escapeHTML(b.id) + '</td><td>' + escapeHTML(b.nombre) + '</td><td>' + escapeHTML(b.categoria) +
+        '</td><td>' + escapeHTML(b.ubicacion) + '</td><td>' + escapeHTML(b.estadoAnterior) + '</td><td>' + fmt(b.costo) + '</td></tr>';
+    }).join('') +
+    '<tr class="inf-total"><td colspan="6">Total (' + d.bienes.length + ' bienes)</td><td>' + fmt(total) + '</td></tr>' +
+    '</tbody></table>' +
+    '<div class="inf-firmas"><div><span></span>Elaboró · Encargado(a) de inventario</div><div><span></span>Recibe' +
+    (d.destino === 'Donación' ? ' · Institución beneficiaria' : '') + '</div><div><span></span>Director(a) · Sello</div></div>');
+}
+
+/* ----- Kits de aula ----- */
+function resumenKit(activos) {
+  const c = {};
+  activos.forEach(function (a) { const n = (a.nombre || 'Sin nombre').trim(); c[n] = (c[n] || 0) + 1; });
+  return Object.keys(c).sort(function (a, b) { return c[b] - c[a]; }).map(function (n) {
+    return c[n] + ' × ' + n.charAt(0) + n.slice(1).toLowerCase();
+  });
+}
+
+function renderKits() {
+  const kits = gestion.kits || [];
+  const cont = document.getElementById('gsKitsLista');
+  if (!kits.length) {
+    cont.innerHTML = '<div class="gs-vacio card-panel">Todavía no hay kits. Crea uno con “+ Nuevo kit”: eliges el aula y marcas sus muebles.</div>';
+    return;
+  }
+  cont.innerHTML = kits.map(function (k) {
+    const miembros = k.ids.map(buscarActivoLocal).filter(Boolean);
+    const fuera = miembros.filter(function (a) { return !mismaAula(a.ubicacion, k.aula); }).length;
+    const faltan = k.ids.length - miembros.length;
+    const comp = resumenKit(miembros);
+    return '<div class="kit-card">' +
+      '<div class="kit-top"><div><strong>' + escapeHTML(k.nombre) + '</strong><span>' + escapeHTML(k.id) + '</span></div>' +
+      '<span class="kit-aula">📍 ' + escapeHTML(k.aula || 'Sin aula') + '</span></div>' +
+      '<p class="kit-n"><b>' + k.ids.length + '</b> muebles</p>' +
+      '<ul class="kit-comp">' + comp.slice(0, 4).map(function (t) { return '<li>' + escapeHTML(t) + '</li>'; }).join('') +
+      (comp.length > 4 ? '<li>… y ' + (comp.length - 4) + ' tipos más</li>' : '') + '</ul>' +
+      (fuera ? '<p class="kit-aviso">⚠ ' + fuera + ' mueble(s) no están en ' + escapeHTML(k.aula) + '.</p>' : '') +
+      (faltan ? '<p class="kit-aviso">⚠ ' + faltan + ' ID(s) ya no existen en el catálogo.</p>' : '') +
+      '<div class="kit-acc">' +
+        botonAccion('primary-button', 'abrirMoverKit', k.id, '⇄ Trasladar') +
+        botonAccion('secondary-button', 'abrirEditorKit', k.id, 'Editar') +
+        botonAccion('secondary-button', 'eliminarKitUI', k.id, 'Eliminar') +
+      '</div></div>';
+  }).join('');
+}
+
+function opcionesAulas(sel, valor, primera) {
+  sel.innerHTML = (primera ? '<option value="">' + primera + '</option>' : '') + nombresAulas().map(function (n) {
+    return '<option value="' + escapeHTML(n) + '">' + escapeHTML(n) + '</option>';
+  }).join('');
+  if (valor) {
+    const op = Array.prototype.find.call(sel.options, function (o) { return mismaAula(o.value, valor); });
+    if (op) sel.value = op.value;
+  }
+}
+
+function abrirEditorKit(id) {
+  kitEditando = id ? (gestion.kits || []).find(function (k) { return k.id === id; }) : null;
+  document.getElementById('kitEditorTitulo').textContent = kitEditando ? 'Editar ' + kitEditando.nombre : 'Nuevo kit';
+  document.getElementById('kitNombre').value = kitEditando ? kitEditando.nombre : '';
+  opcionesAulas(document.getElementById('kitAula'), kitEditando ? kitEditando.aula : '', 'Elige el aula…');
+  kitCargarMuebles();
+  document.getElementById('kitEditor').classList.remove('hidden');
+  document.getElementById('kitNombre').focus();
+}
+
+function cerrarEditorKit() { document.getElementById('kitEditor').classList.add('hidden'); kitEditando = null; }
+
+function kitCargarMuebles() {
+  const aula = document.getElementById('kitAula').value;
+  const cont = document.getElementById('kitMuebles');
+  document.getElementById('kitTodos').checked = false;
+  if (!aula) { cont.innerHTML = '<div class="gs-vacio">Elige el aula para ver sus muebles.</div>'; gsContar(); return; }
+  const marcados = kitEditando ? kitEditando.ids.map(idNorm) : null;
+  const lista = activosVigentes().filter(function (a) { return mismaAula(a.ubicacion, aula); });
+  // Al editar, también se muestran los miembros que hoy están en otra aula
+  if (kitEditando) kitEditando.ids.forEach(function (id) {
+    const a = buscarActivoLocal(id);
+    if (a && lista.indexOf(a) < 0) lista.push(a);
+  });
+  cont.innerHTML = lista.length
+    ? lista.map(function (a) { return itemGs(a, '', '', marcados ? marcados.indexOf(idNorm(a.id)) >= 0 : true); }).join('')
+    : '<div class="gs-vacio">Esta aula no tiene muebles registrados.</div>';
+  gsContar();
+}
+
+function guardarKitUI() {
+  const btn = document.getElementById('kitGuardar');
+  btn.disabled = true;
+  llamar('guardarKit', {
+    id: kitEditando ? kitEditando.id : '',
+    nombre: document.getElementById('kitNombre').value.trim(),
+    aula: document.getElementById('kitAula').value,
+    ids: seleccionados('kitMuebles'),
+    token: tokenSesion()
+  }).then(function (r) {
+    btn.disabled = false;
+    showToast(r.mensaje || 'Listo');
+    if (r.exito) { cerrarEditorKit(); refrescarTrasCambio(); }
+  });
+}
+
+function eliminarKitUI(id) {
+  if (!confirm('¿Eliminar el kit ' + id + '? Los muebles se quedan donde están.')) return;
+  llamar('eliminarKit', { id: id, token: tokenSesion() }).then(function (r) {
+    showToast(r.mensaje || 'Listo');
+    if (r.exito) refrescarTrasCambio();
+  });
+}
+
+function abrirMoverKit(id) {
+  kitMoviendo = (gestion.kits || []).find(function (k) { return k.id === id; });
+  if (!kitMoviendo) return;
+  document.getElementById('kitMoverInfo').textContent =
+    kitMoviendo.nombre + ' · ' + kitMoviendo.ids.length + ' muebles · ahora en ' + (kitMoviendo.aula || 'sin aula');
+  opcionesAulas(document.getElementById('kitDestino'), '', 'Elige la nueva aula…');
+  document.getElementById('kitMoverOk').disabled = false;
+  document.getElementById('modalKit').classList.remove('hidden');
+}
+function cerrarModalKit() { document.getElementById('modalKit').classList.add('hidden'); }
+
+function confirmarMoverKit() {
+  const destino = document.getElementById('kitDestino').value;
+  if (!destino) { showToast('Elige la nueva aula.'); return; }
+  if (mismaAula(destino, kitMoviendo.aula)) { showToast('El kit ya está en esa aula.'); return; }
+  const btn = document.getElementById('kitMoverOk');
+  btn.disabled = true;
+  btn.textContent = 'Trasladando…';
+  llamar('moverKit', { id: kitMoviendo.id, aulaDestino: destino, token: tokenSesion() }).then(function (r) {
+    btn.disabled = false;
+    btn.textContent = 'Trasladar todo';
+    showToast(r.mensaje || 'Listo');
+    if (r.exito) { cerrarModalKit(); refrescarTrasCambio(); }
+  });
+}
+
+/* ----- Avisos (administradores) ----- */
+function renderAvisos() {
+  const c = gestion.config || {};
+  document.getElementById('avCorreos').value = c.correos || '';
+  document.getElementById('avTgChat').value = c.telegramChat || '';
+  document.getElementById('avTgToken').value = '';
+  document.getElementById('avTgToken').placeholder = c.telegramConfigurado ? '•••••• (guardado; escribe otro para cambiarlo)' : 'Pega aquí el token';
+  document.getElementById('avTgQuitar').checked = false;
+  document.getElementById('avMeses').value = c.mesesDefecto || 12;
+  document.getElementById('avMesesEq').value = c.mesesEquipo || 6;
+  document.getElementById('avResumen').checked = !!c.resumenSemanal;
+  const partes = [];
+  partes.push(c.correos ? '✓ Correo activo' : '✕ Sin correos');
+  partes.push(c.telegramConfigurado ? '✓ Telegram activo' : '✕ Sin Telegram');
+  if (c.cuotaCorreo != null) partes.push('Correos disponibles hoy: ' + c.cuotaCorreo);
+  document.getElementById('avEstado').textContent = partes.join(' · ');
+}
+
+function guardarAvisosUI() {
+  const btn = document.getElementById('avGuardar');
+  btn.disabled = true;
+  llamar('guardarConfigAvisos', {
+    token: tokenSesion(),
+    correos: document.getElementById('avCorreos').value,
+    telegramToken: document.getElementById('avTgToken').value.trim(),
+    telegramChat: document.getElementById('avTgChat').value.trim(),
+    quitarTelegram: document.getElementById('avTgQuitar').checked,
+    mesesDefecto: document.getElementById('avMeses').value,
+    mesesEquipo: document.getElementById('avMesesEq').value,
+    resumenSemanal: document.getElementById('avResumen').checked
+  }).then(function (r) {
+    btn.disabled = false;
+    showToast(r.mensaje || 'Listo');
+    if (r.exito && r.config) { gestion.config = r.config; renderAvisos(); refrescarTrasCambio(); }
+  });
+}
+
+function probarAvisosUI() {
+  const btn = document.getElementById('avProbar');
+  btn.disabled = true;
+  llamar('probarAvisos', tokenSesion()).then(function (r) {
+    btn.disabled = false;
+    document.getElementById('avEstado').textContent = r.mensaje || '';
+    showToast(r.exito ? 'Aviso de prueba enviado.' : (r.mensaje || 'No se pudo enviar.'));
+  });
+}
+/* ---------- USUARIOS Y ROLES (solo administradores) ---------- */
+const ROLES_SICAM = ['Usuario', 'Directivo', 'Administrador'];
+
+function cargarUsuarios() {
+  const tb = document.getElementById('gsUsuariosLista');
+  tb.innerHTML = '<tr><td colspan="4">Cargando…</td></tr>';
+  llamar('obtenerUsuarios', tokenSesion()).then(function (r) {
+    if (!r.exito) { tb.innerHTML = '<tr><td colspan="4">' + escapeHTML(r.mensaje || 'No se pudo cargar.') + '</td></tr>'; return; }
+    if (!r.usuarios.length) { tb.innerHTML = '<tr><td colspan="4">No hay cuentas registradas.</td></tr>'; return; }
+    tb.innerHTML = r.usuarios.map(function (u) {
+      const opciones = ROLES_SICAM.map(function (rol) {
+        return '<option value="' + rol + '"' + (rol === u.rol ? ' selected' : '') + '>' + rol + '</option>';
+      }).join('');
+      return '<tr><td>' + escapeHTML(u.nombre || '—') + (u.email === r.yo ? ' <span class="rol-yo">(tú)</span>' : '') + '</td>' +
+        '<td>' + escapeHTML(u.email) + '</td>' +
+        '<td>' + (u.metodo === 'google' ? 'Google' : 'Correo y contraseña') + '</td>' +
+        '<td><select class="rol-select" data-cambio="cambiarRolUI" data-email="' + escapeHTML(u.email) + '" data-antes="' + escapeHTML(u.rol) + '"' +
+        ' aria-label="Rol de ' + escapeHTML(u.nombre || u.email) + '">' + opciones + '</select></td></tr>';
+    }).join('');
+  });
+}
+
+function cambiarRolUI(e) {
+  const sel = e.target;
+  const email = sel.getAttribute('data-email');
+  const antes = sel.getAttribute('data-antes');
+  if (!confirm('¿Cambiar el rol de ' + email + ' a ' + sel.value + '?')) { sel.value = antes; return; }
+  sel.disabled = true;
+  llamar('cambiarRolUsuario', { token: tokenSesion(), email: email, rol: sel.value }).then(function (r) {
+    sel.disabled = false;
+    showToast(r.mensaje || 'Listo');
+    if (!r.exito) { sel.value = antes; return; }
+    sel.setAttribute('data-antes', sel.value);
+    if (email === usuarioSesion().email) refrescarSesion();
+  });
+}
+</script>

@@ -1,0 +1,405 @@
+<script>
+/* =====================================================================
+   SICAM · js/Registro — registrar un bien (CREATE) y etiquetas QR
+     1. Listas del formulario (categorías, bienes del manual, aulas…)
+     2. Fotos + reconocimiento con IA local (MobileNet, gratis)
+     3. Observaciones frecuentes (chips)
+     4. Validación y guardado
+     5. Etiquetas QR para imprimir
+   ===================================================================== */
+
+/* ---------- 1. LISTAS ---------- */
+let listaBienes = [];
+let listasCargadas = false;
+
+function cargarListas() {
+  if (listasCargadas) return;
+  listasCargadas = true;
+  obtenerListasSicam().then(function (listas) {
+    if (!listas.bienes) { listasCargadas = false; return; }
+    listaBienes = listas.bienes || [];
+    llenarSelect('categoria', listas.categorias || []);
+    llenarSelect('ubicacion', listas.aulas || []);
+    llenarSelect('asignado', listas.personal || []);
+    llenarSelect('estado', (listas.estados && listas.estados.length) ? listas.estados : ['Bueno', 'Regular', 'Dañado', 'En Mantenimiento']);
+    filtrarBienes();
+  });
+}
+
+function llenarSelect(id, opciones) {
+  const sel = document.getElementById(id);
+  const previo = sel.value;
+  sel.innerHTML = '<option value="">' + (id === 'categoria' ? '— Todas / seleccionar —' : '— Seleccionar —') + '</option>' +
+    opciones.map(function (op) { return '<option value="' + escapeHTML(op) + '">' + escapeHTML(op) + '</option>'; }).join('');
+  if (previo) sel.value = previo;
+}
+
+/** Filtra la lista de bienes del manual por categoría y texto */
+function filtrarBienes() {
+  const selNombre = document.getElementById('nombre');
+  const cat = document.getElementById('categoria').value;
+  const q = document.getElementById('buscarBien').value.trim().toLowerCase();
+  const previo = selNombre.value;
+  const filtrados = listaBienes.filter(function (b) {
+    if (cat && (b.grupo || '') !== cat) return false;
+    return !q || ((b.codigo || '') + ' ' + (b.nombre || '') + ' ' + (b.grupo || '')).toLowerCase().indexOf(q) >= 0;
+  });
+  selNombre.innerHTML = '<option value="">' + (filtrados.length ? '— Seleccionar bien —' : '— Sin coincidencias —') + '</option>' +
+    filtrados.map(function (b) {
+      return '<option value="' + escapeHTML((b.codigo || '') + '|' + (b.nombre || '')) + '" data-codigo="' + escapeHTML(b.codigo || '') +
+        '" data-grupo="' + escapeHTML(b.grupo || '') + '" data-nombre="' + escapeHTML(b.nombre || '') + '">' +
+        escapeHTML((b.codigo ? b.codigo + ' · ' : '') + (b.nombre || '')) + '</option>';
+    }).join('');
+  if (previo) {
+    selNombre.value = previo;
+    if (selNombre.value !== previo) document.getElementById('codigoBien').value = '';
+  }
+}
+
+function onNombreChange() {
+  const sel = document.getElementById('nombre');
+  const opt = sel.options[sel.selectedIndex];
+  if (!opt || !opt.value) { document.getElementById('codigoBien').value = ''; renderObsChips(null); return; }
+  const grupo = opt.getAttribute('data-grupo') || '';
+  document.getElementById('codigoBien').value = opt.getAttribute('data-codigo') || opt.value.split('|')[0];
+  const selCat = document.getElementById('categoria');
+  if (grupo && selCat.value !== grupo) selCat.value = grupo;
+  cargarObsBien(opt.getAttribute('data-nombre') || '', grupo);
+}
+
+function onCategoriaChange() {
+  document.getElementById('buscarBien').value = '';
+  document.getElementById('codigoBien').value = '';
+  filtrarBienes();
+}
+
+document.getElementById('categoria').addEventListener('change', onCategoriaChange);
+document.getElementById('nombre').addEventListener('change', onNombreChange);
+document.getElementById('buscarBien').addEventListener('input', filtrarBienes);
+
+/** La IA sugiere un nombre: se busca la opción más parecida en la lista del manual */
+function seleccionarBienPorNombre(nombre, categoria) {
+  const nom = String(nombre || '').toLowerCase().trim();
+  if (categoria && listaBienes.some(function (b) { return b.grupo === categoria; })) document.getElementById('categoria').value = categoria;
+  filtrarBienes();
+  if (!nom) return;
+  const sel = document.getElementById('nombre');
+  let mejor = -1, puntaje = 0;
+  for (let i = 0; i < sel.options.length; i++) {
+    const o = sel.options[i];
+    if (!o.value) continue;
+    const dn = (o.getAttribute('data-nombre') || o.textContent).toLowerCase();
+    if (dn === nom) { mejor = i; break; }
+    if (dn.indexOf(nom) >= 0 || nom.indexOf(dn) >= 0) {
+      const p = Math.min(dn.length, nom.length);
+      if (p > puntaje) { puntaje = p; mejor = i; }
+    }
+  }
+  if (mejor >= 0) { sel.selectedIndex = mejor; onNombreChange(); }
+}
+
+/* ---------- 2. FOTOS E IA ---------- */
+const MAX_FOTOS = 5;
+let iaInicializada = false;
+let vectorCaracteristicas = [];
+let fotosBase64 = [];
+let catalogoIA = null; // huellas del catálogo, se piden una vez por sesión
+const estadoIA = document.getElementById('estadoIA');
+
+async function inicializarIA() {
+  if (iaInicializada) return;
+  iaInicializada = true;
+  habilitarBotonesFoto(true); // las fotos se pueden tomar mientras la IA termina de descargar
+  try {
+    estadoIA.textContent = 'Descargando la IA (solo la primera vez)…';
+    await asegurarModelo();
+    estadoIA.textContent = 'IA lista. Toma una foto del bien.';
+  } catch (error) {
+    console.warn('IA no disponible:', error);
+    iaInicializada = false;
+    estadoIA.textContent = 'IA no disponible. Puedes registrar el bien sin ella.';
+  }
+}
+
+function habilitarBotonesFoto(on) {
+  const lleno = fotosBase64.length >= MAX_FOTOS;
+  document.getElementById('btnAbrirCamara').disabled = !on || lleno;
+  document.getElementById('btnGaleria').disabled = !on || lleno;
+}
+
+function mostrarFormulario(si) {
+  document.getElementById('formulario').classList.toggle('hidden', !si);
+  document.getElementById('formHint').classList.toggle('hidden', si);
+}
+
+function renderFotos() {
+  const grid = document.getElementById('fotosGrid');
+  grid.innerHTML = fotosBase64.length
+    ? fotosBase64.map(function (f, i) {
+        return '<div class="foto-item' + (i === 0 ? ' principal' : '') + '"><img src="' + f + '" alt="Foto ' + (i + 1) + '">' +
+          (i === 0 ? '<span class="foto-tag">Principal</span>' : '') +
+          '<button type="button" class="foto-quitar" title="Quitar foto" aria-label="Quitar foto" data-accion="quitarFoto" data-num="' + i + '">✕</button></div>';
+      }).join('')
+    : '<div class="fotos-vacio">Aún no hay fotos</div>';
+  document.getElementById('fotosContador').textContent = fotosBase64.length + ' de ' + MAX_FOTOS + ' fotos · la primera es la principal';
+}
+
+function quitarFoto(i) {
+  fotosBase64.splice(i, 1);
+  if (!fotosBase64.length) vectorCaracteristicas = [];
+  renderFotos();
+  habilitarBotonesFoto(true);
+}
+
+async function procesarFotos(event) {
+  const archivos = Array.prototype.slice.call(event.target.files || []);
+  event.target.value = '';
+  if (!archivos.length) return;
+  const libres = MAX_FOTOS - fotosBase64.length;
+  if (libres <= 0) { showToast('Máximo ' + MAX_FOTOS + ' fotos por bien.'); return; }
+  if (archivos.length > libres) showToast('Solo caben ' + libres + ' foto(s) más; se agregan las primeras.');
+  habilitarBotonesFoto(false);
+  const total = Math.min(archivos.length, libres);
+  for (let n = 0; n < total; n++) {
+    const eraPrimera = fotosBase64.length === 0;
+    estadoIA.textContent = 'Reduciendo la foto ' + (n + 1) + ' de ' + total + '…';
+    try {
+      const res = await procesarImagen(archivos[n], eraPrimera);
+      fotosBase64.push(res.data);
+      renderFotos();
+      mostrarFormulario(true);
+      if (eraPrimera) await analizarPrimeraFoto(res.canvas224);
+    } catch (error) {
+      console.warn(error);
+      estadoIA.textContent = 'Memoria baja. Cierra otras apps e intenta de nuevo.';
+    }
+  }
+  habilitarBotonesFoto(true);
+}
+
+/** Compara la primera foto con las huellas del catálogo; si se parece más de 85 %, llena los datos */
+async function analizarPrimeraFoto(canvas) {
+  if (!modelo && modeloPromesa && canvas) {
+    estadoIA.textContent = 'Esperando a que termine de cargar la IA…';
+    try { await modeloPromesa; } catch (e) {}
+  }
+  if (!modelo || !canvas) { estadoIA.textContent = 'Foto lista. Completa los datos.'; return; }
+  estadoIA.textContent = 'Analizando la foto con IA…';
+  vectorCaracteristicas = vectorDeCanvas(canvas);
+  canvas.width = 0; canvas.height = 0;
+  estadoIA.textContent = 'Buscando bienes parecidos…';
+  if (!catalogoIA) {
+    const r = await new Promise(function (resolve) {
+      google.script.run.withSuccessHandler(resolve).withFailureHandler(function () { resolve(null); }).obtenerCatalogo();
+    });
+    if (!r) { estadoIA.textContent = 'Foto lista. Completa los datos.'; return; }
+    catalogoIA = r;
+  }
+  let mayor = 0, mejor = null;
+  catalogoIA.forEach(function (item) {
+    if (item.vector && item.vector.length === vectorCaracteristicas.length) {
+      const sim = calcularSimilitud(vectorCaracteristicas, item.vector);
+      if (sim > mayor) { mayor = sim; mejor = item; }
+    }
+  });
+  if (mayor > 0.85 && mejor) {
+    seleccionarBienPorNombre(mejor.nombre || '', mejor.categoria || '');
+    document.getElementById('costo').value = mejor.costo || '';
+    if (mejor.ubicacion) document.getElementById('ubicacion').value = mejor.ubicacion;
+    if (mejor.asignado) document.getElementById('asignado').value = mejor.asignado;
+    estadoIA.textContent = 'Se parece a "' + mejor.nombre + '" (' + (mayor * 100).toFixed(1) + ' %). Revisa los datos.';
+  } else {
+    ['nombre', 'categoria', 'codigoBien', 'costo'].forEach(function (id) { document.getElementById(id).value = ''; });
+    filtrarBienes();
+    renderObsChips(null);
+    estadoIA.textContent = 'Es un bien nuevo para la IA. Completa los datos.';
+  }
+}
+
+/* ---------- 3. OBSERVACIONES FRECUENTES ---------- */
+let obsReqId = 0;
+
+function renderObsChips(lista, mensaje) {
+  const box = document.getElementById('obsChips');
+  const otroVisible = !document.getElementById('obsOtro').classList.contains('hidden');
+  box.innerHTML = (lista && lista.length
+    ? lista.map(function (o) { return '<button type="button" class="chip" data-obs="' + escapeHTML(o) + '">' + escapeHTML(o) + '</button>'; }).join('')
+    : '<span class="chips-hint">' + escapeHTML(mensaje || 'Elige el bien para ver las observaciones más comunes.') + '</span>') +
+    '<button type="button" class="chip chip-otro' + (otroVisible ? ' on' : '') + '" id="chipOtro" data-accion="toggleOtro">✎ Otro…</button>';
+}
+
+/* Un clic marca o desmarca cada observación (se escucha en el contenedor de los chips) */
+['obsChips', 'rxChips'].forEach(function (id) {
+  document.getElementById(id).addEventListener('click', function (e) {
+    const chip = e.target.closest('.chip[data-obs]');
+    if (chip) toggleChip(chip);
+  });
+});
+
+function cargarObsBien(nombre, grupo) {
+  const clave = nombre + '|' + grupo;
+  const mi = ++obsReqId;
+  if (obsCache[clave]) { renderObsChips(obsCache[clave]); return; }
+  renderObsChips(null, 'Cargando observaciones…');
+  google.script.run
+    .withSuccessHandler(function (lista) {
+      if (mi !== obsReqId) return;
+      obsCache[clave] = lista || [];
+      renderObsChips(obsCache[clave]);
+    })
+    .withFailureHandler(function () {
+      if (mi === obsReqId) renderObsChips(null, 'No se pudieron cargar. Usa "Otro" para escribirla.');
+    })
+    .obtenerObservacionesComunes(nombre, grupo);
+}
+
+function toggleOtro() {
+  const inp = document.getElementById('obsOtro');
+  const mostrar = inp.classList.contains('hidden');
+  inp.classList.toggle('hidden', !mostrar);
+  document.getElementById('chipOtro').classList.toggle('on', mostrar);
+  if (mostrar) inp.focus(); else inp.value = '';
+}
+
+function obtenerObservaciones() {
+  const marcadas = Array.prototype.map.call(document.querySelectorAll('#obsChips .chip.on[data-obs]'), function (c) { return c.getAttribute('data-obs'); });
+  const inp = document.getElementById('obsOtro');
+  const otro = inp.classList.contains('hidden') ? '' : inp.value.trim();
+  if (otro) marcadas.push(otro);
+  return marcadas.join('; ');
+}
+
+/* ---------- 4. VALIDACIÓN Y GUARDADO ---------- */
+function limpiarFormulario() {
+  ['nombre', 'categoria', 'codigoBien', 'buscarBien', 'marca', 'ubicacion', 'asignado', 'costo', 'estado', 'obsOtro']
+    .forEach(function (id) { document.getElementById(id).value = ''; });
+  document.getElementById('obsOtro').classList.add('hidden');
+  renderObsChips(null);
+  fotosBase64 = [];
+  vectorCaracteristicas = [];
+  renderFotos();
+  habilitarBotonesFoto(true);
+  mostrarFormulario(false);
+  estadoIA.textContent = modelo ? 'IA lista. Toma una foto del bien.' : 'Toma una foto del bien.';
+  filtrarBienes();
+}
+
+function guardarDatos() {
+  const sel = document.getElementById('nombre');
+  const opt = sel.options[sel.selectedIndex];
+  const valor = sel.value || '';
+  const codigoBien = document.getElementById('codigoBien').value || (opt && opt.getAttribute('data-codigo')) || valor.split('|')[0];
+  const nombreBien = (opt && opt.getAttribute('data-nombre')) || (valor.indexOf('|') >= 0 ? valor.split('|').slice(1).join('|') : valor);
+  const categoria = document.getElementById('categoria').value || (opt && opt.getAttribute('data-grupo')) || '';
+  const ubicacion = document.getElementById('ubicacion').value;
+  const costoTxt = document.getElementById('costo').value.trim();
+  const costo = Number(costoTxt);
+  const inpOtro = document.getElementById('obsOtro');
+
+  // Mismas reglas que el servidor (validarActivo_): se avisa antes de enviar
+  if (!nombreBien || !codigoBien) { showToast('Elige el bien de la lista "Nombre del bien".'); sel.focus(); return; }
+  if (!categoria) { showToast('Elige la categoría.'); return; }
+  if (!ubicacion) { showToast('Elige la ubicación (aula o espacio).'); document.getElementById('ubicacion').focus(); return; }
+  if (costoTxt && (isNaN(costo) || costo < 0 || costo > 100000)) { showToast('El costo debe ser un número entre 0 y 100 000.'); return; }
+  if (!inpOtro.classList.contains('hidden') && !inpOtro.value.trim()) { showToast('Escribe la observación en "Otro" o quita esa opción.'); inpOtro.focus(); return; }
+
+  const btn = document.getElementById('btnGuardar');
+  btn.disabled = true;
+  btn.textContent = 'Subiendo fotos y guardando…';
+  const restaurar = function () { btn.disabled = false; btn.innerHTML = icono('guardar') + 'Registrar en inventario'; };
+  llamar('guardarActivoMaster', {
+    nombre: nombreBien, categoria: categoria, codigo_bien: codigoBien,
+    marca: document.getElementById('marca').value.trim(), ubicacion: ubicacion,
+    asignado: document.getElementById('asignado').value, costo: costoTxt,
+    estado: document.getElementById('estado').value, observaciones: obtenerObservaciones(),
+    fotos_base64: fotosBase64.slice(), vector_ia: vectorCaracteristicas, token: tokenSesion()
+  }).then(function (r) {
+    restaurar();
+    showToast(r.mensaje || (r.exito ? 'Guardado' : 'No se pudo guardar'));
+    if (r.exito === false) return;
+    limpiarFormulario();
+    catalogoIA = null;
+    cargarActivos(true);
+  });
+}
+
+/* ---------- 5. ETIQUETAS QR ---------- */
+let qrToken = 0;
+let qrTimer = null;
+
+function cargarQR(forzar) {
+  const grid = document.getElementById('qrGrid');
+  grid.innerHTML = '<div class="mapa-loading">Preparando etiquetas…</div>';
+  document.getElementById('qrEmpty').classList.add('hidden');
+  if (!URL_APP) { grid.innerHTML = '<div class="mapa-loading">No se pudo obtener la URL. Vuelve a implementar la Web App.</div>'; return; }
+  Promise.all([obtenerActivos(forzar), asegurarQRCode()])
+    .then(function () { poblarFiltroAulaQR(); renderQR(); })
+    .catch(function (err) { grid.innerHTML = '<div class="mapa-loading">Error: ' + escapeHTML(err.message || err) + '</div>'; });
+}
+
+function poblarFiltroAulaQR() {
+  const sel = document.getElementById('qrAula');
+  const actual = sel.value;
+  const aulas = listaAulasActivos();
+  sel.innerHTML = '<option value="all">Todas las aulas</option>' +
+    aulas.map(function (u) { return '<option value="' + escapeHTML(u) + '">' + escapeHTML(u) + '</option>'; }).join('');
+  sel.value = aulas.indexOf(actual) >= 0 ? actual : 'all';
+}
+
+/** Cada etiqueta lleva un QR con la dirección de la ficha: …/exec?id=ID */
+function crearEtiquetaQR(a, sep) {
+  const div = document.createElement('div');
+  div.className = 'qr-etiqueta';
+  const qrDiv = document.createElement('div');
+  qrDiv.className = 'qr-code';
+  div.appendChild(qrDiv);
+  const idLimpio = String(a.id || '').replace(/[ ﻿]/g, '').trim();
+  try {
+    new QRCode(qrDiv, { text: URL_APP + sep + 'id=' + encodeURIComponent(idLimpio), width: 120, height: 120, correctLevel: QRCode.CorrectLevel.M });
+  } catch (e) { qrDiv.textContent = 'Error QR'; }
+  [['qr-nombre', a.nombre || 'Sin nombre'], ['qr-id', a.id], ['qr-ubi', a.ubicacion || '']].forEach(function (p) {
+    if (!p[1]) return;
+    const el = document.createElement('div');
+    el.className = p[0];
+    el.textContent = p[1];
+    div.appendChild(el);
+  });
+  return div;
+}
+
+function renderQR() {
+  const grid = document.getElementById('qrGrid');
+  const empty = document.getElementById('qrEmpty');
+  const q = document.getElementById('qrFiltro').value.toLowerCase().trim();
+  const aula = document.getElementById('qrAula').value;
+  const lista = todosLosActivos.filter(function (a) {
+    return (aula === 'all' || a.ubicacion === aula) && !esDeBaja(a.estado) &&
+      (!q || (a.id + ' ' + a.nombre + ' ' + a.ubicacion).toLowerCase().indexOf(q) >= 0);
+  });
+  document.getElementById('qrCount').textContent = plural(lista.length, 'etiqueta', 'etiquetas');
+  grid.innerHTML = '';
+  empty.classList.toggle('hidden', lista.length > 0);
+  if (!lista.length) return;
+  const sep = URL_APP.indexOf('?') >= 0 ? '&' : '?';
+  const token = ++qrToken;
+  let i = 0;
+  // Se dibujan de 40 en 40 para no congelar el teléfono
+  (function lote() {
+    if (token !== qrToken) return;
+    const fin = Math.min(i + 40, lista.length);
+    for (; i < fin; i++) grid.appendChild(crearEtiquetaQR(lista[i], sep));
+    if (i < lista.length) setTimeout(lote, 0);
+  })();
+}
+
+function imprimirQR() {
+  document.body.classList.remove('modo-informe');
+  window.print();
+}
+
+document.getElementById('qrFiltro').addEventListener('input', function () {
+  clearTimeout(qrTimer);
+  qrTimer = setTimeout(renderQR, 200);
+});
+document.getElementById('qrAula').addEventListener('change', renderQR);
+</script>

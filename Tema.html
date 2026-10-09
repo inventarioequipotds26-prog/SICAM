@@ -1,0 +1,9 @@
+<script>
+/* SICAM · js/Tema
+   Se carga en <head>: aplica el tema guardado (claro u oscuro) antes de pintar la página. */
+    try {
+      var temaGuardado = localStorage.getItem('sicamTema');
+      var oscuro = temaGuardado ? temaGuardado === 'oscuro' : window.matchMedia('(prefers-color-scheme: dark)').matches;
+      document.documentElement.setAttribute('data-theme', oscuro ? 'oscuro' : 'claro');
+    } catch (e) {}
+  </script>
